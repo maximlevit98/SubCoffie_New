@@ -1,0 +1,663 @@
+import SwiftUI
+
+struct OrderStatusView: View {
+    let orderId: UUID
+    @ObservedObject var orderStore: OrderStore
+    let useLocalOrder: Bool
+    let onRefund: (_ paidCredits: Int, _ bonusUsed: Int, _ orderId: UUID) -> Void
+    let onBackToCafe: () -> Void
+
+    @State private var order: Order?
+    @State private var events: [OrderStatusEvent] = []
+    @State private var isQrPresented = false
+    @State private var createdAt: Date = Date()
+    @State private var pollingTask: Task<Void, Never>?
+    @State private var hintTimeout: Bool = false
+    @State private var didRefund = false
+    @State private var qrToken: String? = nil
+    @State private var isLoadingQrToken: Bool = false
+    @State private var errorMessage: String? = nil
+    @State private var retryCount: Int = 0
+    @State private var showReorderConfirmation: Bool = false
+    @State private var isReordering: Bool = false
+    @State private var reorderedOrderId: UUID? = nil
+
+    private let orderService = OrderService()
+    private let pollInterval: TimeInterval = 2.5
+    private let acceptanceTimeout: TimeInterval = 120
+    private let maxRetries: Int = 3
+
+    private var isTerminal: Bool {
+        guard let status = order?.status else { return false }
+        switch status {
+        case .rejected, .pickedUp, .issued, .canceled, .refunded, .noShow:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var body: some View {
+        let displayOrder = useLocalOrder ? orderStore.activeOrder : order
+        Group {
+            if let order = displayOrder {
+                ScrollView {
+                    VStack(spacing: 14) {
+                        header(order)
+                        timeline(order)
+                        totals(order)
+                        qrBlock(order)
+                        if hintTimeout {
+                            Text("Кофейня не ответила — можно отменить")
+                                .font(.footnote)
+                                .foregroundColor(.orange)
+                                .multilineTextAlignment(.center)
+                        }
+    #if DEBUG
+                        debugPanel(order)
+    #endif
+                        actions(order)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
+                }
+            } else {
+                VStack(spacing: 16) {
+                    Spacer()
+                    
+                    if let errorMessage = errorMessage {
+                        VStack(spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.largeTitle)
+                                .foregroundColor(.orange)
+                            
+                            Text("Не удалось загрузить заказ")
+                                .font(.headline)
+                            
+                            Text(errorMessage)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                            
+                            if retryCount < maxRetries {
+                                Button("Повторить попытку") {
+                                    Task {
+                                        self.errorMessage = nil
+                                        await startPolling()
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            
+                            Button("Назад в кофейню") {
+                                onBackToCafe()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    } else {
+                        ProgressView("Получаем заказ...")
+                    }
+                    
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+            }
+        }
+        .sheet(isPresented: $isQrPresented) {
+            if let order {
+                QRSheetView(
+                    title: "QR для выдачи",
+                    payload: qrPayload(for: order),
+                    onClose: { isQrPresented = false }
+                )
+            }
+        }
+        .task(id: orderId) {
+            if !useLocalOrder {
+                await startPolling()
+            } else if let localOrder = orderStore.activeOrder {
+                order = localOrder
+                events = localOrder.events
+            }
+        }
+        .onChange(of: orderStore.activeOrder?.events.count, initial: false) { _, _ in
+            guard useLocalOrder, let localOrder = orderStore.activeOrder else { return }
+            order = localOrder
+            events = localOrder.events
+        }
+        .onDisappear {
+            pollingTask?.cancel()
+            pollingTask = nil
+        }
+    }
+
+    private func header(_ order: Order) -> some View {
+        VStack(spacing: 6) {
+            Text("Статус заказа")
+                .font(.title2)
+                .fontWeight(.bold)
+
+            if let cafeName = order.cafeName {
+                Text(cafeName)
+                    .foregroundColor(.secondary)
+            }
+
+            Text(order.status.titleRu)
+                .font(.headline)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.gray.opacity(0.12))
+                .clipShape(Capsule())
+        }
+    }
+
+    private func timeline(_ order: Order) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Прогресс заказа")
+                .font(.headline)
+            
+            // Visual progress indicator
+            progressIndicator(order)
+            
+            Divider()
+                .padding(.vertical, 4)
+            
+            // Event timeline
+            VStack(alignment: .leading, spacing: 12) {
+                Text("История")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+                
+                ForEach(events) { e in
+                    timelineRow(event: e, isLatest: e.id == events.last?.id)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+    
+    private func progressIndicator(_ order: Order) -> some View {
+        HStack(spacing: 8) {
+            progressStep(
+                icon: "doc.text",
+                label: "Создан",
+                isActive: order.status != .rejected && order.status != .canceled,
+                isCompleted: order.status != .created && order.status != .rejected && order.status != .canceled
+            )
+            
+            progressConnector(
+                isActive: order.status != .created && order.status != .rejected && order.status != .canceled
+            )
+            
+            progressStep(
+                icon: "checkmark.circle",
+                label: "Принят",
+                isActive: order.status != .rejected && order.status != .canceled && order.status != .created,
+                isCompleted: [.inProgress, .ready, .issued, .pickedUp].contains(order.status)
+            )
+            
+            progressConnector(
+                isActive: [.inProgress, .ready, .issued, .pickedUp].contains(order.status)
+            )
+            
+            progressStep(
+                icon: "clock",
+                label: "Готовится",
+                isActive: [.inProgress, .ready, .issued, .pickedUp].contains(order.status),
+                isCompleted: [.ready, .issued, .pickedUp].contains(order.status)
+            )
+            
+            progressConnector(
+                isActive: [.ready, .issued, .pickedUp].contains(order.status)
+            )
+            
+            progressStep(
+                icon: "cup.and.saucer",
+                label: "Готов",
+                isActive: [.ready, .issued, .pickedUp].contains(order.status),
+                isCompleted: [.issued, .pickedUp].contains(order.status)
+            )
+        }
+        .padding(.vertical, 8)
+    }
+    
+    private func progressStep(icon: String, label: String, isActive: Bool, isCompleted: Bool) -> some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(isCompleted ? Color.green : (isActive ? Color.blue : Color.gray.opacity(0.3)))
+                    .frame(width: 40, height: 40)
+                
+                Image(systemName: isCompleted ? "checkmark" : icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isActive ? .primary : .secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(width: 60)
+        }
+    }
+    
+    private func progressConnector(isActive: Bool) -> some View {
+        Rectangle()
+            .fill(isActive ? Color.blue : Color.gray.opacity(0.3))
+            .frame(height: 2)
+            .frame(maxWidth: .infinity)
+    }
+    
+    private func timelineRow(event: OrderStatusEvent, isLatest: Bool) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            // Timeline indicator
+            VStack(spacing: 0) {
+                Circle()
+                    .fill(statusColor(for: event.status))
+                    .frame(width: 10, height: 10)
+                
+                if !isLatest {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(width: 2)
+                        .frame(maxHeight: .infinity)
+                }
+            }
+            .frame(height: isLatest ? 10 : nil)
+            
+            // Event details
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(event.status.titleRu)
+                        .fontWeight(.semibold)
+                        .font(.subheadline)
+                    
+                    if isLatest {
+                        Text("текущий")
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(statusColor(for: event.status))
+                            .clipShape(Capsule())
+                    }
+                }
+                
+                Text(formatDateTime(event.timestamp))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                if let description = statusDescription(for: event.status) {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .italic()
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(.bottom, isLatest ? 0 : 8)
+    }
+    
+    private func statusColor(for status: OrderStatus) -> Color {
+        switch status {
+        case .created:
+            return .blue
+        case .accepted:
+            return .green
+        case .rejected, .canceled, .refunded, .noShow:
+            return .red
+        case .inProgress:
+            return .orange
+        case .ready:
+            return .purple
+        case .issued, .pickedUp:
+            return .green
+        }
+    }
+    
+    private func statusDescription(for status: OrderStatus) -> String? {
+        switch status {
+        case .created:
+            return "Ожидаем подтверждения от кафе"
+        case .accepted:
+            return "Кафе приняло ваш заказ"
+        case .inProgress:
+            return "Бариста готовит ваш заказ"
+        case .ready:
+            return "Можете забрать заказ"
+        case .issued:
+            return "Приятного аппетита!"
+        case .rejected:
+            return "Кафе не может принять заказ"
+        case .canceled:
+            return "Заказ был отменён"
+        case .refunded:
+            return "Средства возвращены"
+        case .noShow:
+            return "Заказ не был забран вовремя"
+        default:
+            return nil
+        }
+    }
+
+    private func totals(_ order: Order) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Оплата (демо)")
+                .font(.headline)
+
+            HStack { Text("Подытог"); Spacer(); Text("\(order.subtotalCredits) Credits") }
+            HStack { Text("Скидка Bonus+"); Spacer(); Text("-\(order.bonusUsed)") }
+            Divider()
+            HStack { Text("Оплачено Credits"); Spacer(); Text("\(order.paidCredits)").fontWeight(.semibold) }
+        }
+        .font(.subheadline)
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+
+    private func actions(_ order: Order) -> some View {
+        VStack(spacing: 10) {
+
+            Button(qrButtonTitle(for: order)) {
+                isQrPresented = true
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!isQrAvailable(for: order))
+            .opacity(isQrAvailable(for: order) ? 1 : 0.5)
+            
+            // Reorder button for completed orders
+            if [.issued, .pickedUp].contains(order.status) {
+                Button(action: {
+                    showReorderConfirmation = true
+                }) {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Повторить заказ")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isReordering)
+            }
+
+            Button("Назад в кофейню") { onBackToCafe() }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+        }
+        .alert("Повторить заказ?", isPresented: $showReorderConfirmation) {
+            Button("Отмена", role: .cancel) {}
+            Button("Повторить") {
+                Task {
+                    await reorder(order)
+                }
+            }
+        } message: {
+            Text("Создать новый заказ с теми же позициями?")
+        }
+        .onChange(of: reorderedOrderId) { _, newOrderId in
+            if let newOrderId = newOrderId {
+                // Could navigate to new order here if needed
+                #if DEBUG
+                print("✅ Reordered to new order: \(newOrderId)")
+                #endif
+            }
+        }
+    }
+
+    private func qrBlock(_ order: Order) -> some View {
+        VStack(spacing: 10) {
+            if isQrAvailable(for: order) {
+                Text("QR для выдачи")
+                    .font(.headline)
+                if isLoadingQrToken && qrToken == nil && !useLocalOrder {
+                    ProgressView("Получаем QR…")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                } else {
+                    let image = QRCodeGenerator.make(from: qrPayload(for: order), scale: 10)
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 220, maxHeight: 220)
+                        .padding(8)
+                        .background(Color.white)
+                        .cornerRadius(12)
+                        .shadow(radius: 4)
+                }
+#if DEBUG
+                Button("Симулировать скан") {
+                    Task {
+                        do {
+                            try await orderService.setOrderStatus(orderId: orderId, status: .issued)
+                        } catch {
+                            #if DEBUG
+                            print("Sim scan failed: \(error)")
+                            #endif
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+#endif
+            } else {
+                Text("QR появится, когда заказ будет готов")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity)
+        .background(Color.gray.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    // MARK: - DEBUG Panel
+    @ViewBuilder
+    private func debugPanel(_ order: Order) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Barista simulator (DEBUG)")
+                .font(.headline)
+            HStack {
+                debugButton("Accept", status: .accepted, enabled: order.status == .created)
+                debugButton("Reject", status: .rejected, enabled: order.status == .created)
+            }
+            HStack {
+                debugButton("In progress", status: .inProgress, enabled: order.status == .accepted)
+                debugButton("Ready", status: .ready, enabled: order.status == .inProgress)
+            }
+            HStack {
+                debugButton("Issued", status: .issued, enabled: order.status == .ready)
+                debugButton("No-show", status: .noShow, enabled: order.status == .ready)
+            }
+            HStack {
+                debugButton("Cancel", status: .canceled, enabled: order.status == .created || order.status == .accepted || order.status == .inProgress)
+                debugButton("Refund", status: .refunded, enabled: true)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.08))
+        .cornerRadius(12)
+    }
+
+    private func debugButton(_ title: String, status: OrderStatus, enabled: Bool) -> some View {
+        Button(title) {
+            Task {
+                do {
+                    try await orderService.setOrderStatus(orderId: orderId, status: status)
+                } catch {
+                    #if DEBUG
+                    print("Barista simulator failed: \(error)")
+                    #endif
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
+    }
+    
+    private func formatDateTime(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.locale = Locale(identifier: "ru_RU")
+        
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Сегодня в " + f.string(from: date)
+        } else if calendar.isDateInYesterday(date) {
+            return "Вчера в " + f.string(from: date)
+        } else {
+            f.dateFormat = "d MMM в HH:mm"
+            return f.string(from: date)
+        }
+    }
+
+    private func startPolling() async {
+        pollingTask?.cancel()
+        
+        await MainActor.run {
+            errorMessage = nil
+            retryCount += 1
+        }
+        
+        pollingTask = Task.detached(priority: .background) {
+            var consecutiveErrors = 0
+            while !Task.isCancelled {
+                do {
+                    async let orderFetch: Order = try await orderService.fetchOrder(orderId: orderId)
+                    async let eventsFetch: [OrderStatusEvent] = try await orderService.fetchOrderEvents(orderId: orderId)
+                    let (fetchedOrder, fetchedEvents) = try await (orderFetch, eventsFetch)
+                    
+                    consecutiveErrors = 0 // Reset on success
+                    
+                    let shouldFetch = await MainActor.run {
+                        self.shouldFetchQrToken(for: fetchedOrder)
+                    }
+                    if shouldFetch {
+                        await self.fetchQrTokenIfNeeded(orderId: fetchedOrder.id)
+                    }
+                    await MainActor.run {
+                        self.order = fetchedOrder
+                        self.events = fetchedEvents
+                        self.errorMessage = nil
+                        if let created = fetchedOrder.createdAt {
+                            self.createdAt = created
+                            let elapsed = Date().timeIntervalSince(created)
+                            self.hintTimeout = fetchedOrder.status == .created && elapsed > acceptanceTimeout
+                        }
+                        if fetchedOrder.status == .refunded, !didRefund {
+                            onRefund(fetchedOrder.paidCredits, fetchedOrder.bonusUsed, fetchedOrder.id)
+                            didRefund = true
+                        }
+                        if isTerminal {
+                            pollingTask?.cancel()
+                        }
+                    }
+                } catch {
+                    consecutiveErrors += 1
+                    #if DEBUG
+                    print("❌ [OrderStatus] Poll failed (\(consecutiveErrors)): \(error)")
+                    #endif
+                    
+                    // Show error after 3 consecutive failures
+                    if consecutiveErrors >= 3 {
+                        await MainActor.run {
+                            self.errorMessage = "Заказ не найден или проблема с подключением. ID: \(orderId.uuidString.prefix(8))..."
+                            pollingTask?.cancel()
+                        }
+                        break
+                    }
+                }
+                try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            }
+        }
+    }
+
+    private func isQrAvailable(for order: Order) -> Bool {
+        switch order.status {
+        case .ready, .issued:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func qrButtonTitle(for order: Order) -> String {
+        if isQrAvailable(for: order) {
+            return "Показать QR для выдачи"
+        }
+        return "QR будет доступен, когда заказ готов"
+    }
+
+    private func qrPayload(for order: Order) -> String {
+        if let token = qrToken, !token.isEmpty {
+            return token
+        }
+        return order.qrPayload
+    }
+
+    private func shouldFetchQrToken(for order: Order) -> Bool {
+        guard !useLocalOrder else { return false }
+        guard isQrAvailable(for: order) else { return false }
+        return qrToken == nil && !isLoadingQrToken
+    }
+
+    private func fetchQrTokenIfNeeded(orderId: UUID) async {
+        guard !isLoadingQrToken else { return }
+        await MainActor.run { isLoadingQrToken = true }
+        do {
+            let token = try await orderService.createOrderQrToken(orderId: orderId)
+            await MainActor.run {
+                qrToken = token
+            }
+        } catch {
+            #if DEBUG
+            print("QR token fetch failed: \(error)")
+            #endif
+        }
+        await MainActor.run { isLoadingQrToken = false }
+    }
+    
+    private func reorder(_ order: Order) async {
+        await MainActor.run {
+            isReordering = true
+        }
+        
+        do {
+            let newOrderId = try await orderService.reorderFromExisting(originalOrderId: order.id)
+            
+            await MainActor.run {
+                isReordering = false
+                reorderedOrderId = newOrderId
+            }
+            
+            #if DEBUG
+            print("✅ [OrderStatus] Reordered successfully: \(newOrderId)")
+            #endif
+            
+        } catch {
+            await MainActor.run {
+                isReordering = false
+                errorMessage = "Не удалось повторить заказ: \(error.localizedDescription)"
+            }
+            
+            #if DEBUG
+            print("❌ [OrderStatus] Reorder failed: \(error)")
+            #endif
+        }
+    }
+}

@@ -1,0 +1,196 @@
+-- Migration: Hourly Order Statistics
+-- Description: Добавляет RPC функцию для получения статистики заказов по часам
+
+-- ============================================================================
+-- RPC: Статистика заказов по часам
+-- ============================================================================
+
+create or replace function get_hourly_orders_stats(
+  cafe_id_param uuid,
+  date_from timestamptz default now() - interval '7 days',
+  date_to timestamptz default now()
+)
+returns table (
+  hour_of_day int,
+  orders_count bigint,
+  total_revenue bigint,
+  avg_order_value numeric,
+  unique_customers bigint
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  select 
+    extract(hour from o.created_at)::int as hour_of_day,
+    count(*) as orders_count,
+    coalesce(sum(o.paid_credits), 0) as total_revenue,
+    coalesce(avg(o.paid_credits), 0) as avg_order_value,
+    count(distinct o.customer_phone) as unique_customers
+  from public.orders o
+  where 
+    o.created_at between date_from and date_to
+    and o.status not in ('cancelled', 'refunded')
+    and o.cafe_id = cafe_id_param
+  group by extract(hour from o.created_at)
+  order by hour_of_day;
+end;
+$$;
+
+comment on function get_hourly_orders_stats is 'Получает статистику заказов по часам дня за период для определения пиковых часов';
+
+-- ============================================================================
+-- RPC: Конверсия и эффективность
+-- ============================================================================
+
+create or replace function get_cafe_conversion_stats(
+  cafe_id_param uuid,
+  date_from timestamptz default now() - interval '30 days',
+  date_to timestamptz default now()
+)
+returns jsonb
+security definer
+language plpgsql
+as $$
+declare
+  result jsonb;
+  total_orders int;
+  completed_orders int;
+  cancelled_orders int;
+  avg_preparation_time interval;
+begin
+  -- Подсчет заказов по статусам
+  select 
+    count(*),
+    count(*) filter (where status = 'issued'),
+    count(*) filter (where status in ('cancelled', 'refunded'))
+  into total_orders, completed_orders, cancelled_orders
+  from public.orders
+  where 
+    cafe_id = cafe_id_param
+    and created_at between date_from and date_to;
+  
+  -- Среднее время подготовки (от paid до ready)
+  select avg(
+    extract(epoch from (updated_at - created_at)) / 60
+  )::interval
+  into avg_preparation_time
+  from public.orders
+  where 
+    cafe_id = cafe_id_param
+    and status in ('ready', 'issued')
+    and created_at between date_from and date_to;
+  
+  -- Формирование результата
+  result := jsonb_build_object(
+    'period', jsonb_build_object(
+      'from', date_from,
+      'to', date_to
+    ),
+    'orders', jsonb_build_object(
+      'total', total_orders,
+      'completed', completed_orders,
+      'cancelled', cancelled_orders
+    ),
+    'conversion', jsonb_build_object(
+      'completion_rate', case 
+        when total_orders > 0 then round((completed_orders::numeric / total_orders * 100), 2)
+        else 0
+      end,
+      'cancellation_rate', case 
+        when total_orders > 0 then round((cancelled_orders::numeric / total_orders * 100), 2)
+        else 0
+      end
+    ),
+    'performance', jsonb_build_object(
+      'avg_preparation_minutes', coalesce(extract(epoch from avg_preparation_time) / 60, 0)
+    )
+  );
+  
+  return result;
+end;
+$$;
+
+comment on function get_cafe_conversion_stats is 'Получает статистику конверсии и эффективности работы кафе';
+
+-- ============================================================================
+-- RPC: Сравнение периодов
+-- ============================================================================
+
+create or replace function get_period_comparison(
+  cafe_id_param uuid,
+  current_from timestamptz,
+  current_to timestamptz,
+  previous_from timestamptz,
+  previous_to timestamptz
+)
+returns jsonb
+security definer
+language plpgsql
+as $$
+declare
+  current_stats jsonb;
+  previous_stats jsonb;
+  result jsonb;
+begin
+  -- Статистика текущего периода
+  select jsonb_build_object(
+    'orders', count(*),
+    'revenue', coalesce(sum(paid_credits) filter (where status not in ('cancelled', 'refunded')), 0),
+    'avg_order', coalesce(avg(paid_credits) filter (where status not in ('cancelled', 'refunded')), 0),
+    'customers', count(distinct customer_phone)
+  ) into current_stats
+  from public.orders
+  where 
+    cafe_id = cafe_id_param
+    and created_at between current_from and current_to;
+  
+  -- Статистика предыдущего периода
+  select jsonb_build_object(
+    'orders', count(*),
+    'revenue', coalesce(sum(paid_credits) filter (where status not in ('cancelled', 'refunded')), 0),
+    'avg_order', coalesce(avg(paid_credits) filter (where status not in ('cancelled', 'refunded')), 0),
+    'customers', count(distinct customer_phone)
+  ) into previous_stats
+  from public.orders
+  where 
+    cafe_id = cafe_id_param
+    and created_at between previous_from and previous_to;
+  
+  -- Расчет изменений в процентах
+  result := jsonb_build_object(
+    'current', current_stats,
+    'previous', previous_stats,
+    'growth', jsonb_build_object(
+      'orders', case 
+        when (previous_stats->>'orders')::numeric > 0 
+        then round(((current_stats->>'orders')::numeric - (previous_stats->>'orders')::numeric) / (previous_stats->>'orders')::numeric * 100, 2)
+        else 0
+      end,
+      'revenue', case 
+        when (previous_stats->>'revenue')::numeric > 0 
+        then round(((current_stats->>'revenue')::numeric - (previous_stats->>'revenue')::numeric) / (previous_stats->>'revenue')::numeric * 100, 2)
+        else 0
+      end,
+      'customers', case 
+        when (previous_stats->>'customers')::numeric > 0 
+        then round(((current_stats->>'customers')::numeric - (previous_stats->>'customers')::numeric) / (previous_stats->>'customers')::numeric * 100, 2)
+        else 0
+      end
+    )
+  );
+  
+  return result;
+end;
+$$;
+
+comment on function get_period_comparison is 'Сравнивает статистику между двумя периодами с расчетом роста';
+
+-- ============================================================================
+-- Grant permissions
+-- ============================================================================
+
+grant execute on function get_hourly_orders_stats to authenticated;
+grant execute on function get_cafe_conversion_stats to authenticated;
+grant execute on function get_period_comparison to authenticated;

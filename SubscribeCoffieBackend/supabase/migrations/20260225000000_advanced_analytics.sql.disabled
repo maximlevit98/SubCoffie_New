@@ -1,0 +1,846 @@
+-- Migration: Advanced Analytics and BI
+-- Description: Создает расширенные аналитические view и функции для когортного анализа, 
+--              воронки конверсии, предсказания оттока и бизнес-аналитики
+
+-- ============================================================================
+-- 1. Cohort Analysis (Когортный анализ)
+-- ============================================================================
+
+-- Таблица для агрегации когортных данных
+create table if not exists public.cohort_analytics (
+  id uuid primary key default gen_random_uuid(),
+  cohort_month date not null,
+  period_number int not null,
+  users_count int not null,
+  active_users int not null,
+  retention_rate decimal(5,2) not null,
+  total_revenue bigint not null,
+  avg_revenue_per_user decimal(10,2) not null,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  unique(cohort_month, period_number)
+);
+
+comment on table public.cohort_analytics is 'Агрегированные данные когортного анализа';
+
+-- Функция для расчета когортной аналитики
+create or replace function calculate_cohort_retention(
+  months_back int default 12
+)
+returns table (
+  cohort_month date,
+  cohort_size bigint,
+  period_number int,
+  active_users bigint,
+  retention_rate decimal,
+  total_orders bigint,
+  total_revenue bigint,
+  avg_revenue_per_user decimal
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  with first_order as (
+    -- Определяем первый заказ каждого пользователя (когорта)
+    select 
+      customer_phone,
+      date_trunc('month', min(created_at))::date as cohort_month
+    from public.orders
+    where status not in ('cancelled', 'refunded')
+    group by customer_phone
+  ),
+  cohort_activity as (
+    -- Активность пользователей по месяцам
+    select 
+      fo.cohort_month,
+      fo.customer_phone,
+      date_trunc('month', o.created_at)::date as activity_month,
+      extract(year from age(date_trunc('month', o.created_at), fo.cohort_month::timestamptz)) * 12 +
+      extract(month from age(date_trunc('month', o.created_at), fo.cohort_month::timestamptz)) as period_number,
+      count(*) as orders_count,
+      sum(o.paid_credits) as revenue
+    from first_order fo
+    join public.orders o on o.customer_phone = fo.customer_phone
+    where 
+      o.status not in ('cancelled', 'refunded')
+      and fo.cohort_month >= date_trunc('month', now() - interval '1 month' * months_back)::date
+    group by fo.cohort_month, fo.customer_phone, activity_month
+  )
+  select 
+    ca.cohort_month,
+    count(distinct fo.customer_phone) as cohort_size,
+    ca.period_number::int,
+    count(distinct ca.customer_phone) as active_users,
+    round(count(distinct ca.customer_phone)::decimal / count(distinct fo.customer_phone) * 100, 2) as retention_rate,
+    sum(ca.orders_count) as total_orders,
+    coalesce(sum(ca.revenue), 0) as total_revenue,
+    round(coalesce(sum(ca.revenue), 0)::decimal / count(distinct ca.customer_phone), 2) as avg_revenue_per_user
+  from cohort_activity ca
+  join first_order fo on fo.cohort_month = ca.cohort_month
+  group by ca.cohort_month, ca.period_number
+  order by ca.cohort_month desc, ca.period_number;
+end;
+$$;
+
+comment on function calculate_cohort_retention is 'Расчет когортной retention rate пользователей';
+
+-- ============================================================================
+-- 2. Funnel Analysis (Анализ воронки конверсии)
+-- ============================================================================
+
+create table if not exists public.funnel_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid,
+  customer_phone text,
+  event_type text not null check (event_type in ('view_cafe', 'add_to_cart', 'checkout', 'payment', 'order_created', 'order_completed')),
+  cafe_id uuid references public.cafes(id),
+  order_id uuid references public.orders(id),
+  session_id text,
+  metadata jsonb default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create index idx_funnel_events_customer on public.funnel_events(customer_phone);
+create index idx_funnel_events_session on public.funnel_events(session_id);
+create index idx_funnel_events_created on public.funnel_events(created_at);
+create index idx_funnel_events_type on public.funnel_events(event_type);
+
+comment on table public.funnel_events is 'События пользователя для анализа воронки конверсии';
+
+-- Функция для расчета воронки конверсии
+create or replace function calculate_conversion_funnel(
+  cafe_id_param uuid default null,
+  from_date timestamptz default now() - interval '30 days',
+  to_date timestamptz default now()
+)
+returns table (
+  step_name text,
+  step_order int,
+  users_count bigint,
+  conversion_from_previous decimal,
+  conversion_from_start decimal,
+  avg_time_to_next_step interval
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  with funnel_steps as (
+    select 
+      event_type,
+      case event_type
+        when 'view_cafe' then 1
+        when 'add_to_cart' then 2
+        when 'checkout' then 3
+        when 'payment' then 4
+        when 'order_created' then 5
+        when 'order_completed' then 6
+      end as step_order,
+      customer_phone,
+      created_at
+    from public.funnel_events
+    where 
+      created_at between from_date and to_date
+      and (cafe_id_param is null or cafe_id = cafe_id_param)
+  ),
+  step_counts as (
+    select 
+      event_type,
+      step_order,
+      count(distinct customer_phone) as users_count
+    from funnel_steps
+    group by event_type, step_order
+  ),
+  time_to_next as (
+    select 
+      fs1.event_type,
+      fs1.step_order,
+      avg(fs2.created_at - fs1.created_at) as avg_time
+    from funnel_steps fs1
+    left join funnel_steps fs2 on 
+      fs2.customer_phone = fs1.customer_phone 
+      and fs2.step_order = fs1.step_order + 1
+    group by fs1.event_type, fs1.step_order
+  )
+  select 
+    sc.event_type::text,
+    sc.step_order::int,
+    sc.users_count,
+    round(
+      case 
+        when lag(sc.users_count) over (order by sc.step_order) is null then 100.0
+        else (sc.users_count::decimal / lag(sc.users_count) over (order by sc.step_order) * 100)
+      end, 
+      2
+    ) as conversion_from_previous,
+    round(
+      (sc.users_count::decimal / first_value(sc.users_count) over (order by sc.step_order) * 100), 
+      2
+    ) as conversion_from_start,
+    coalesce(ttn.avg_time, interval '0') as avg_time_to_next_step
+  from step_counts sc
+  left join time_to_next ttn on ttn.step_order = sc.step_order
+  order by sc.step_order;
+end;
+$$;
+
+comment on function calculate_conversion_funnel is 'Расчет воронки конверсии пользователей';
+
+-- ============================================================================
+-- 3. Churn Prediction (Предсказание оттока)
+-- ============================================================================
+
+create table if not exists public.user_churn_risk (
+  id uuid primary key default gen_random_uuid(),
+  customer_phone text not null,
+  risk_score decimal(5,2) not null check (risk_score between 0 and 100),
+  risk_level text not null check (risk_level in ('low', 'medium', 'high', 'critical')),
+  last_order_date timestamptz,
+  days_since_last_order int,
+  total_orders int,
+  total_spent bigint,
+  avg_order_frequency decimal,
+  features jsonb default '{}'::jsonb,
+  calculated_at timestamptz default now(),
+  unique(customer_phone, calculated_at::date)
+);
+
+create index idx_churn_risk_phone on public.user_churn_risk(customer_phone);
+create index idx_churn_risk_level on public.user_churn_risk(risk_level);
+create index idx_churn_risk_score on public.user_churn_risk(risk_score desc);
+
+comment on table public.user_churn_risk is 'Оценка риска оттока пользователей';
+
+-- Функция для расчета риска оттока
+create or replace function calculate_churn_risk()
+returns table (
+  customer_phone text,
+  risk_score decimal,
+  risk_level text,
+  last_order_date timestamptz,
+  days_since_last_order int,
+  total_orders bigint,
+  total_spent bigint,
+  avg_days_between_orders decimal,
+  features jsonb
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  with user_stats as (
+    select 
+      o.customer_phone,
+      max(o.created_at) as last_order_date,
+      extract(day from now() - max(o.created_at))::int as days_since_last_order,
+      count(*) as total_orders,
+      sum(o.paid_credits) as total_spent,
+      case 
+        when count(*) > 1 then
+          extract(day from max(o.created_at) - min(o.created_at))::decimal / nullif(count(*) - 1, 0)
+        else null
+      end as avg_days_between_orders,
+      count(distinct o.cafe_id) as unique_cafes,
+      avg(o.paid_credits) as avg_order_value
+    from public.orders o
+    where o.status not in ('cancelled', 'refunded')
+    group by o.customer_phone
+  ),
+  risk_calculation as (
+    select 
+      us.*,
+      -- Расчет риска на основе нескольких факторов
+      case 
+        -- Высокий риск: не заказывал более чем в 3 раза дольше обычного
+        when us.avg_days_between_orders is not null 
+          and us.days_since_last_order > us.avg_days_between_orders * 3 then 90
+        -- Высокий риск: не заказывал более 60 дней
+        when us.days_since_last_order > 60 then 80
+        -- Средний риск: не заказывал более чем в 2 раза дольше обычного
+        when us.avg_days_between_orders is not null 
+          and us.days_since_last_order > us.avg_days_between_orders * 2 then 60
+        -- Средний риск: не заказывал более 30 дней
+        when us.days_since_last_order > 30 then 50
+        -- Низкий риск: активные пользователи
+        when us.days_since_last_order <= 7 then 10
+        -- Умеренный риск
+        else 30
+      end as base_risk,
+      -- Корректировка на основе истории
+      case 
+        when us.total_orders >= 20 then -10  -- Лояльные клиенты
+        when us.total_orders >= 10 then -5
+        when us.total_orders <= 2 then 15    -- Новые клиенты более склонны к оттоку
+        else 0
+      end as loyalty_adjustment,
+      -- Корректировка на основе среднего чека
+      case 
+        when us.avg_order_value > 500 then -5  -- Высокий LTV
+        when us.avg_order_value < 200 then 5
+        else 0
+      end as value_adjustment
+    from user_stats us
+  )
+  select 
+    rc.customer_phone::text,
+    least(greatest(rc.base_risk + rc.loyalty_adjustment + rc.value_adjustment, 0), 100)::decimal(5,2) as risk_score,
+    case 
+      when (rc.base_risk + rc.loyalty_adjustment + rc.value_adjustment) >= 80 then 'critical'::text
+      when (rc.base_risk + rc.loyalty_adjustment + rc.value_adjustment) >= 60 then 'high'::text
+      when (rc.base_risk + rc.loyalty_adjustment + rc.value_adjustment) >= 40 then 'medium'::text
+      else 'low'::text
+    end as risk_level,
+    rc.last_order_date,
+    rc.days_since_last_order::int,
+    rc.total_orders,
+    rc.total_spent,
+    round(rc.avg_days_between_orders, 2) as avg_days_between_orders,
+    jsonb_build_object(
+      'unique_cafes', rc.unique_cafes,
+      'avg_order_value', round(rc.avg_order_value, 2),
+      'base_risk', rc.base_risk,
+      'loyalty_adjustment', rc.loyalty_adjustment,
+      'value_adjustment', rc.value_adjustment
+    ) as features
+  from risk_calculation rc
+  order by risk_score desc;
+end;
+$$;
+
+comment on function calculate_churn_risk is 'Расчет риска оттока пользователей на основе паттернов поведения';
+
+-- ============================================================================
+-- 4. LTV (Lifetime Value) Analysis
+-- ============================================================================
+
+create or replace function calculate_customer_ltv(
+  months_back int default 12
+)
+returns table (
+  customer_phone text,
+  first_order_date timestamptz,
+  last_order_date timestamptz,
+  customer_age_days int,
+  total_orders bigint,
+  total_spent bigint,
+  avg_order_value decimal,
+  order_frequency decimal,
+  predicted_ltv decimal,
+  customer_segment text
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  with customer_stats as (
+    select 
+      o.customer_phone,
+      min(o.created_at) as first_order_date,
+      max(o.created_at) as last_order_date,
+      extract(day from max(o.created_at) - min(o.created_at))::int as customer_age_days,
+      count(*) as total_orders,
+      sum(o.paid_credits) as total_spent,
+      avg(o.paid_credits) as avg_order_value
+    from public.orders o
+    where 
+      o.status not in ('cancelled', 'refunded')
+      and o.created_at >= now() - interval '1 month' * months_back
+    group by o.customer_phone
+  )
+  select 
+    cs.customer_phone::text,
+    cs.first_order_date,
+    cs.last_order_date,
+    cs.customer_age_days::int,
+    cs.total_orders,
+    cs.total_spent,
+    round(cs.avg_order_value, 2) as avg_order_value,
+    case 
+      when cs.customer_age_days > 0 then
+        round(cs.total_orders::decimal / nullif(cs.customer_age_days, 0) * 30, 2)
+      else 0
+    end as order_frequency,
+    -- Простой прогноз LTV: avg_order_value * expected_orders_per_year
+    case 
+      when cs.customer_age_days > 0 then
+        round(
+          cs.avg_order_value * 
+          (cs.total_orders::decimal / nullif(cs.customer_age_days, 0) * 365), 
+          2
+        )
+      else cs.avg_order_value
+    end as predicted_ltv,
+    case 
+      when cs.total_spent >= 10000 then 'vip'::text
+      when cs.total_spent >= 5000 then 'high_value'::text
+      when cs.total_spent >= 2000 then 'medium_value'::text
+      when cs.total_orders >= 10 then 'frequent'::text
+      when cs.total_orders >= 3 then 'regular'::text
+      else 'new'::text
+    end as customer_segment
+  from customer_stats cs
+  order by cs.total_spent desc;
+end;
+$$;
+
+comment on function calculate_customer_ltv is 'Расчет Lifetime Value клиентов';
+
+-- ============================================================================
+-- 5. Advanced Revenue Analytics
+-- ============================================================================
+
+create or replace function get_revenue_breakdown(
+  cafe_id_param uuid default null,
+  from_date timestamptz default now() - interval '30 days',
+  to_date timestamptz default now()
+)
+returns jsonb
+security definer
+language plpgsql
+as $$
+declare
+  result jsonb;
+begin
+  with revenue_data as (
+    select 
+      o.cafe_id,
+      c.name as cafe_name,
+      count(*) as total_orders,
+      sum(o.paid_credits) as gross_revenue,
+      sum(o.bonus_used) as bonus_revenue,
+      sum(o.paid_credits - o.bonus_used) as net_revenue,
+      avg(o.paid_credits) as avg_order_value,
+      count(distinct o.customer_phone) as unique_customers,
+      sum(o.paid_credits) / nullif(count(distinct o.customer_phone), 0) as revenue_per_customer
+    from public.orders o
+    join public.cafes c on c.id = o.cafe_id
+    where 
+      o.status not in ('cancelled', 'refunded')
+      and o.created_at between from_date and to_date
+      and (cafe_id_param is null or o.cafe_id = cafe_id_param)
+    group by o.cafe_id, c.name
+  ),
+  category_revenue as (
+    select 
+      mi.category,
+      count(distinct oi.order_id) as orders_count,
+      sum(oi.line_total) as revenue,
+      sum(oi.quantity) as items_sold
+    from public.order_items oi
+    join public.menu_items mi on mi.id = oi.menu_item_id
+    join public.orders o on o.id = oi.order_id
+    where 
+      o.status not in ('cancelled', 'refunded')
+      and o.created_at between from_date and to_date
+      and (cafe_id_param is null or o.cafe_id = cafe_id_param)
+    group by mi.category
+  ),
+  hourly_revenue as (
+    select 
+      extract(hour from o.created_at)::int as hour,
+      count(*) as orders_count,
+      sum(o.paid_credits) as revenue
+    from public.orders o
+    where 
+      o.status not in ('cancelled', 'refunded')
+      and o.created_at between from_date and to_date
+      and (cafe_id_param is null or o.cafe_id = cafe_id_param)
+    group by extract(hour from o.created_at)
+  )
+  select jsonb_build_object(
+    'period', jsonb_build_object(
+      'from', from_date,
+      'to', to_date
+    ),
+    'overview', (
+      select jsonb_agg(
+        jsonb_build_object(
+          'cafe_id', cafe_id,
+          'cafe_name', cafe_name,
+          'total_orders', total_orders,
+          'gross_revenue', gross_revenue,
+          'bonus_revenue', bonus_revenue,
+          'net_revenue', net_revenue,
+          'avg_order_value', round(avg_order_value, 2),
+          'unique_customers', unique_customers,
+          'revenue_per_customer', round(revenue_per_customer, 2)
+        )
+      )
+      from revenue_data
+    ),
+    'by_category', (
+      select jsonb_agg(
+        jsonb_build_object(
+          'category', category,
+          'orders_count', orders_count,
+          'revenue', revenue,
+          'items_sold', items_sold,
+          'avg_item_price', round(revenue::decimal / nullif(items_sold, 0), 2)
+        )
+      )
+      from category_revenue
+    ),
+    'by_hour', (
+      select jsonb_agg(
+        jsonb_build_object(
+          'hour', hour,
+          'orders_count', orders_count,
+          'revenue', revenue,
+          'avg_order_value', round(revenue::decimal / nullif(orders_count, 0), 2)
+        )
+        order by hour
+      )
+      from hourly_revenue
+    )
+  ) into result;
+  
+  return result;
+end;
+$$;
+
+comment on function get_revenue_breakdown is 'Детальная разбивка выручки по различным параметрам';
+
+-- ============================================================================
+-- 6. RFM Analysis (Recency, Frequency, Monetary)
+-- ============================================================================
+
+create or replace function calculate_rfm_segments()
+returns table (
+  customer_phone text,
+  recency_days int,
+  frequency bigint,
+  monetary bigint,
+  r_score int,
+  f_score int,
+  m_score int,
+  rfm_segment text,
+  segment_description text
+)
+security definer
+language plpgsql
+as $$
+begin
+  return query
+  with customer_rfm as (
+    select 
+      o.customer_phone,
+      extract(day from now() - max(o.created_at))::int as recency_days,
+      count(*) as frequency,
+      sum(o.paid_credits) as monetary
+    from public.orders o
+    where o.status not in ('cancelled', 'refunded')
+    group by o.customer_phone
+  ),
+  rfm_scores as (
+    select 
+      customer_phone,
+      recency_days,
+      frequency,
+      monetary,
+      -- R Score (меньше дней = лучше, инвертируем)
+      case 
+        when recency_days <= 7 then 5
+        when recency_days <= 14 then 4
+        when recency_days <= 30 then 3
+        when recency_days <= 60 then 2
+        else 1
+      end as r_score,
+      -- F Score (больше = лучше)
+      case 
+        when frequency >= 20 then 5
+        when frequency >= 10 then 4
+        when frequency >= 5 then 3
+        when frequency >= 2 then 2
+        else 1
+      end as f_score,
+      -- M Score (больше = лучше)
+      case 
+        when monetary >= 10000 then 5
+        when monetary >= 5000 then 4
+        when monetary >= 2000 then 3
+        when monetary >= 1000 then 2
+        else 1
+      end as m_score
+    from customer_rfm
+  )
+  select 
+    rs.customer_phone::text,
+    rs.recency_days::int,
+    rs.frequency,
+    rs.monetary,
+    rs.r_score::int,
+    rs.f_score::int,
+    rs.m_score::int,
+    case 
+      when rs.r_score >= 4 and rs.f_score >= 4 and rs.m_score >= 4 then 'champions'
+      when rs.r_score >= 3 and rs.f_score >= 4 and rs.m_score >= 4 then 'loyal_customers'
+      when rs.r_score >= 4 and rs.f_score <= 2 and rs.m_score >= 4 then 'big_spenders'
+      when rs.r_score >= 4 and rs.f_score >= 3 then 'promising'
+      when rs.r_score >= 3 and rs.f_score >= 3 then 'potential_loyalists'
+      when rs.r_score >= 4 and rs.f_score <= 2 and rs.m_score <= 2 then 'new_customers'
+      when rs.r_score <= 2 and rs.f_score >= 4 and rs.m_score >= 4 then 'at_risk'
+      when rs.r_score <= 2 and rs.f_score >= 2 and rs.m_score >= 2 then 'need_attention'
+      when rs.r_score <= 2 and rs.f_score <= 2 then 'lost'
+      else 'others'
+    end::text as rfm_segment,
+    case 
+      when rs.r_score >= 4 and rs.f_score >= 4 and rs.m_score >= 4 then 'Лучшие клиенты: покупают часто, недавно и много'::text
+      when rs.r_score >= 3 and rs.f_score >= 4 and rs.m_score >= 4 then 'Лояльные клиенты: регулярные покупатели'::text
+      when rs.r_score >= 4 and rs.f_score <= 2 and rs.m_score >= 4 then 'Крупные покупатели: тратят много, но редко'::text
+      when rs.r_score >= 4 and rs.f_score >= 3 then 'Перспективные: недавно и часто покупают'::text
+      when rs.r_score >= 3 and rs.f_score >= 3 then 'Потенциально лояльные: могут стать постоянными'::text
+      when rs.r_score >= 4 and rs.f_score <= 2 and rs.m_score <= 2 then 'Новые клиенты: недавно сделали первый заказ'::text
+      when rs.r_score <= 2 and rs.f_score >= 4 and rs.m_score >= 4 then 'В группе риска: ценные клиенты, которые давно не покупали'::text
+      when rs.r_score <= 2 and rs.f_score >= 2 and rs.m_score >= 2 then 'Требуют внимания: нужно вернуть'::text
+      when rs.r_score <= 2 and rs.f_score <= 2 then 'Потерянные: очень давно не покупали'::text
+      else 'Прочие'::text
+    end as segment_description
+  from rfm_scores rs
+  order by rs.r_score desc, rs.f_score desc, rs.m_score desc;
+end;
+$$;
+
+comment on function calculate_rfm_segments is 'RFM сегментация клиентов для таргетированного маркетинга';
+
+-- ============================================================================
+-- 7. ETL Helper Functions
+-- ============================================================================
+
+-- Функция для обновления когортных данных (можно запускать по расписанию)
+create or replace function refresh_cohort_analytics()
+returns void
+security definer
+language plpgsql
+as $$
+begin
+  -- Удаляем старые данные
+  delete from public.cohort_analytics 
+  where created_at < now() - interval '1 day';
+  
+  -- Вставляем свежие данные
+  insert into public.cohort_analytics (
+    cohort_month, 
+    period_number, 
+    users_count, 
+    active_users, 
+    retention_rate, 
+    total_revenue, 
+    avg_revenue_per_user
+  )
+  select 
+    cohort_month::date,
+    period_number::int,
+    cohort_size::int,
+    active_users::int,
+    retention_rate::decimal(5,2),
+    total_revenue,
+    avg_revenue_per_user::decimal(10,2)
+  from calculate_cohort_retention(12)
+  on conflict (cohort_month, period_number) 
+  do update set
+    users_count = excluded.users_count,
+    active_users = excluded.active_users,
+    retention_rate = excluded.retention_rate,
+    total_revenue = excluded.total_revenue,
+    avg_revenue_per_user = excluded.avg_revenue_per_user,
+    updated_at = now();
+end;
+$$;
+
+comment on function refresh_cohort_analytics is 'Обновляет агрегированные данные когортного анализа';
+
+-- Функция для обновления данных о риске оттока
+create or replace function refresh_churn_risk()
+returns void
+security definer
+language plpgsql
+as $$
+begin
+  insert into public.user_churn_risk (
+    customer_phone,
+    risk_score,
+    risk_level,
+    last_order_date,
+    days_since_last_order,
+    total_orders,
+    total_spent,
+    avg_order_frequency,
+    features
+  )
+  select 
+    customer_phone,
+    risk_score,
+    risk_level,
+    last_order_date,
+    days_since_last_order,
+    total_orders::int,
+    total_spent,
+    avg_days_between_orders,
+    features
+  from calculate_churn_risk()
+  on conflict (customer_phone, calculated_at::date)
+  do update set
+    risk_score = excluded.risk_score,
+    risk_level = excluded.risk_level,
+    last_order_date = excluded.last_order_date,
+    days_since_last_order = excluded.days_since_last_order,
+    total_orders = excluded.total_orders,
+    total_spent = excluded.total_spent,
+    avg_order_frequency = excluded.avg_order_frequency,
+    features = excluded.features;
+end;
+$$;
+
+comment on function refresh_churn_risk is 'Обновляет данные о риске оттока пользователей';
+
+-- ============================================================================
+-- 8. Scheduled Jobs Setup (pg_cron)
+-- ============================================================================
+
+-- Примечание: pg_cron должен быть включен в Supabase Dashboard
+-- Эти задания обновляют аналитические данные каждую ночь
+
+-- Обновление когортной аналитики каждый день в 2:00
+-- select cron.schedule('refresh-cohort-analytics', '0 2 * * *', 'select refresh_cohort_analytics()');
+
+-- Обновление риска оттока каждый день в 3:00
+-- select cron.schedule('refresh-churn-risk', '0 3 * * *', 'select refresh_churn_risk()');
+
+-- ============================================================================
+-- Grant permissions
+-- ============================================================================
+
+grant select on public.cohort_analytics to authenticated;
+grant select on public.funnel_events to authenticated;
+grant insert on public.funnel_events to authenticated;
+grant select on public.user_churn_risk to authenticated;
+
+grant execute on function calculate_cohort_retention to authenticated;
+grant execute on function calculate_conversion_funnel to authenticated;
+grant execute on function calculate_churn_risk to authenticated;
+grant execute on function calculate_customer_ltv to authenticated;
+grant execute on function get_revenue_breakdown to authenticated;
+grant execute on function calculate_rfm_segments to authenticated;
+
+-- Только админы могут обновлять агрегированные данные
+grant execute on function refresh_cohort_analytics to service_role;
+grant execute on function refresh_churn_risk to service_role;
+
+-- ============================================================================
+-- Insert sample funnel event tracking trigger
+-- ============================================================================
+
+-- Автоматическое создание событий воронки при создании заказа
+create or replace function track_order_funnel_event()
+returns trigger
+security definer
+language plpgsql
+as $$
+begin
+  -- Событие создания заказа
+  insert into public.funnel_events (
+    customer_phone,
+    event_type,
+    cafe_id,
+    order_id,
+    metadata
+  ) values (
+    new.customer_phone,
+    'order_created',
+    new.cafe_id,
+    new.id,
+    jsonb_build_object(
+      'paid_credits', new.paid_credits,
+      'items_count', (select count(*) from public.order_items where order_id = new.id)
+    )
+  );
+  
+  return new;
+end;
+$$;
+
+create trigger order_funnel_tracking
+  after insert on public.orders
+  for each row
+  execute function track_order_funnel_event();
+
+comment on trigger order_funnel_tracking on public.orders is 'Автоматическое отслеживание событий воронки для заказов';
+
+-- ============================================================================
+-- Analytics Dashboard Summary Function
+-- ============================================================================
+
+create or replace function get_analytics_dashboard(
+  cafe_id_param uuid default null
+)
+returns jsonb
+security definer
+language plpgsql
+as $$
+declare
+  result jsonb;
+begin
+  select jsonb_build_object(
+    'churn_risk', jsonb_build_object(
+      'critical', count(*) filter (where risk_level = 'critical'),
+      'high', count(*) filter (where risk_level = 'high'),
+      'medium', count(*) filter (where risk_level = 'medium'),
+      'low', count(*) filter (where risk_level = 'low'),
+      'avg_risk_score', round(avg(risk_score), 2)
+    ),
+    'rfm_segments', (
+      select jsonb_object_agg(rfm_segment, segment_count)
+      from (
+        select 
+          case 
+            when r_score >= 4 and f_score >= 4 and m_score >= 4 then 'champions'
+            when r_score >= 3 and f_score >= 4 and m_score >= 4 then 'loyal_customers'
+            when r_score <= 2 and f_score >= 4 then 'at_risk'
+            when r_score >= 4 and f_score <= 2 then 'new_customers'
+            else 'others'
+          end as rfm_segment,
+          count(*) as segment_count
+        from calculate_rfm_segments()
+        group by rfm_segment
+      ) segments
+    ),
+    'ltv_summary', jsonb_build_object(
+      'total_customers', count(distinct customer_phone),
+      'avg_ltv', round(avg(predicted_ltv), 2),
+      'total_ltv', round(sum(predicted_ltv), 2),
+      'vip_count', count(*) filter (where customer_segment = 'vip'),
+      'high_value_count', count(*) filter (where customer_segment = 'high_value')
+    ),
+    'recent_cohort', (
+      select jsonb_build_object(
+        'cohort_month', cohort_month,
+        'cohort_size', cohort_size,
+        'retention_m1', max(retention_rate) filter (where period_number = 1),
+        'retention_m3', max(retention_rate) filter (where period_number = 3),
+        'retention_m6', max(retention_rate) filter (where period_number = 6)
+      )
+      from calculate_cohort_retention(12)
+      group by cohort_month, cohort_size
+      order by cohort_month desc
+      limit 1
+    )
+  ) into result
+  from (
+    select * from calculate_churn_risk()
+  ) churn_data
+  cross join (
+    select * from calculate_customer_ltv(12)
+  ) ltv_data;
+  
+  return result;
+end;
+$$;
+
+comment on function get_analytics_dashboard is 'Сводная панель всех аналитических метрик';
+
+grant execute on function get_analytics_dashboard to authenticated;

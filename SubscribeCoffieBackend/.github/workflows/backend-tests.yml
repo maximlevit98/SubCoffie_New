@@ -1,0 +1,76 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Backend Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: supabase/postgres:15.1.0.117
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      
+      - name: Start Supabase local instance
+        run: |
+          supabase init
+          supabase start
+        working-directory: ./
+      
+      - name: Run migrations
+        run: |
+          supabase db reset --db-url postgresql://postgres:postgres@localhost:54322/postgres
+        working-directory: ./
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:54322/postgres
+      
+      - name: Run SQL tests
+        run: |
+          chmod +x tests/run_all_tests_enhanced.sh
+          ./tests/run_all_tests_enhanced.sh
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:54322/postgres
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: /tmp/test_output.log
+          retention-days: 7
+      
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "## Test Results 🧪" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ $? -eq 0 ]; then
+            echo "✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some tests failed. Check the logs for details." >> $GITHUB_STEP_SUMMARY
+          fi

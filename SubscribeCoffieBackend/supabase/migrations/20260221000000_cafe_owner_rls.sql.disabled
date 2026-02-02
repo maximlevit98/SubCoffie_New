@@ -1,0 +1,522 @@
+-- B2B Dashboard for Cafe Owners
+-- Add owner_id to cafes, RLS policies, and RPC functions for cafe owner dashboard
+
+-- Add owner_id to cafes table if it doesn't exist
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'cafes' and column_name = 'owner_id'
+  ) then
+    alter table public.cafes add column owner_id uuid references auth.users(id);
+  end if;
+end$$;
+
+create index if not exists cafes_owner_id_idx on public.cafes (owner_id);
+
+-- Helper function to check if user is owner of a cafe
+create or replace function public.is_cafe_owner(cafe_id_param uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  is_owner boolean;
+begin
+  perform set_config('row_security', 'off', true);
+  select exists(
+    select 1 from public.cafes
+    where id = cafe_id_param and owner_id = auth.uid()
+  ) into is_owner;
+  return coalesce(is_owner, false);
+end;
+$$;
+
+-- Helper function to check if user has owner role
+create or replace function public.is_owner_role()
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  has_owner_role boolean;
+begin
+  perform set_config('row_security', 'off', true);
+  select (role = 'owner') into has_owner_role
+  from public.profiles
+  where id = auth.uid()
+  limit 1;
+  return coalesce(has_owner_role, false);
+end;
+$$;
+
+-- RLS policies for cafes - allow owners to see and update their own cafes
+drop policy if exists "Cafes owner select" on public.cafes;
+drop policy if exists "Cafes owner update" on public.cafes;
+
+create policy "Cafes owner select"
+  on public.cafes for select
+  using (owner_id = auth.uid() or public.is_admin());
+
+create policy "Cafes owner update"
+  on public.cafes for update
+  using (owner_id = auth.uid() or public.is_admin());
+
+-- RLS policies for products - owners can manage their cafe's products
+drop policy if exists "Products owner select" on public.products;
+drop policy if exists "Products owner insert" on public.products;
+drop policy if exists "Products owner update" on public.products;
+drop policy if exists "Products owner delete" on public.products;
+
+create policy "Products owner select"
+  on public.products for select
+  using (
+    exists(select 1 from public.cafes where cafes.id = products.cafe_id and (cafes.owner_id = auth.uid() or public.is_admin()))
+  );
+
+create policy "Products owner insert"
+  on public.products for insert
+  with check (
+    exists(select 1 from public.cafes where cafes.id = products.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+create policy "Products owner update"
+  on public.products for update
+  using (
+    exists(select 1 from public.cafes where cafes.id = products.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+create policy "Products owner delete"
+  on public.products for delete
+  using (
+    exists(select 1 from public.cafes where cafes.id = products.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+-- RLS policies for menu_items - owners can manage their cafe's menu items
+drop policy if exists "Menu items owner select" on public.menu_items;
+drop policy if exists "Menu items owner insert" on public.menu_items;
+drop policy if exists "Menu items owner update" on public.menu_items;
+drop policy if exists "Menu items owner delete" on public.menu_items;
+
+create policy "Menu items owner select"
+  on public.menu_items for select
+  using (
+    exists(select 1 from public.cafes where cafes.id = menu_items.cafe_id and (cafes.owner_id = auth.uid() or public.is_admin()))
+  );
+
+create policy "Menu items owner insert"
+  on public.menu_items for insert
+  with check (
+    exists(select 1 from public.cafes where cafes.id = menu_items.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+create policy "Menu items owner update"
+  on public.menu_items for update
+  using (
+    exists(select 1 from public.cafes where cafes.id = menu_items.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+create policy "Menu items owner delete"
+  on public.menu_items for delete
+  using (
+    exists(select 1 from public.cafes where cafes.id = menu_items.cafe_id and cafes.owner_id = auth.uid())
+    or public.is_admin()
+  );
+
+-- RLS policies for orders - owners can view orders for their cafes
+drop policy if exists "Orders owner select" on public.orders;
+
+create policy "Orders owner select"
+  on public.orders for select
+  using (
+    exists(select 1 from public.cafes where cafes.id = orders.cafe_id and (cafes.owner_id = auth.uid() or public.is_admin()))
+  );
+
+-- RPC function to get cafe owner's cafes
+create or replace function public.get_owner_cafes()
+returns table (
+  id uuid,
+  name text,
+  address text,
+  mode text,
+  eta_minutes int,
+  active_orders int,
+  max_active_orders int,
+  supports_citypass boolean,
+  brand_id uuid,
+  created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select 
+    c.id, c.name, c.address, c.mode, c.eta_minutes,
+    c.active_orders, c.max_active_orders, c.supports_citypass,
+    c.brand_id, c.created_at
+  from public.cafes c
+  where c.owner_id = auth.uid()
+  order by c.name;
+end;
+$$;
+
+-- RPC function to get cafe dashboard metrics for cafe owner
+create or replace function public.get_cafe_owner_dashboard_metrics(
+  cafe_id_param uuid,
+  period_param text default 'week' -- 'today', 'week', 'month', 'all'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result jsonb;
+  start_date timestamptz;
+  is_owner boolean;
+begin
+  -- Check if user is owner of this cafe
+  perform set_config('row_security', 'off', true);
+  select exists(
+    select 1 from public.cafes
+    where id = cafe_id_param and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  -- Determine date range
+  case period_param
+    when 'today' then
+      start_date := date_trunc('day', now());
+    when 'week' then
+      start_date := date_trunc('week', now());
+    when 'month' then
+      start_date := date_trunc('month', now());
+    else
+      start_date := '1970-01-01'::timestamptz;
+  end case;
+
+  -- Aggregate metrics
+  with order_stats as (
+    select
+      count(*) as total_orders,
+      count(*) filter (where status = 'picked_up') as completed_orders,
+      count(*) filter (where status = 'cancelled') as cancelled_orders,
+      coalesce(sum(total_credits), 0) as total_revenue,
+      coalesce(avg(total_credits), 0) as avg_order_value,
+      coalesce(avg(extract(epoch from (updated_at - created_at)) / 60), 0) as avg_preparation_minutes
+    from public.orders
+    where cafe_id = cafe_id_param
+      and created_at >= start_date
+  )
+  select jsonb_build_object(
+    'orders', jsonb_build_object(
+      'total', os.total_orders,
+      'completed', os.completed_orders,
+      'cancelled', os.cancelled_orders
+    ),
+    'revenue', jsonb_build_object(
+      'total', os.total_revenue,
+      'average_order', os.avg_order_value
+    ),
+    'performance', jsonb_build_object(
+      'avg_preparation_minutes', os.avg_preparation_minutes,
+      'completion_rate', case when os.total_orders > 0 
+        then round((os.completed_orders::numeric / os.total_orders) * 100, 2) 
+        else 0 
+      end
+    )
+  )
+  into result
+  from order_stats os;
+
+  return result;
+end;
+$$;
+
+-- RPC function to get top performing menu items for cafe owner
+create or replace function public.get_cafe_owner_top_items(
+  cafe_id_param uuid,
+  limit_param int default 10,
+  days_param int default 30
+)
+returns table (
+  item_id uuid,
+  item_name text,
+  category text,
+  total_quantity bigint,
+  total_revenue numeric,
+  order_count bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  is_owner boolean;
+begin
+  -- Check if user is owner of this cafe
+  perform set_config('row_security', 'off', true);
+  select exists(
+    select 1 from public.cafes
+    where id = cafe_id_param and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  return query
+  select 
+    oi.product_id as item_id,
+    p.name as item_name,
+    p.category,
+    sum(oi.quantity)::bigint as total_quantity,
+    sum(oi.quantity * oi.unit_price_credits) as total_revenue,
+    count(distinct oi.order_id)::bigint as order_count
+  from public.order_items oi
+  join public.orders o on o.id = oi.order_id
+  join public.products p on p.id = oi.product_id
+  where o.cafe_id = cafe_id_param
+    and o.status in ('paid', 'preparing', 'ready', 'picked_up')
+    and o.created_at >= now() - (days_param || ' days')::interval
+  group by oi.product_id, p.name, p.category
+  order by total_revenue desc
+  limit limit_param;
+end;
+$$;
+
+-- RPC function to get hourly order distribution for cafe owner
+create or replace function public.get_cafe_owner_hourly_stats(
+  cafe_id_param uuid,
+  days_param int default 7
+)
+returns table (
+  hour_of_day int,
+  orders_count bigint,
+  total_revenue numeric,
+  avg_order_value numeric
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  is_owner boolean;
+begin
+  -- Check if user is owner of this cafe
+  perform set_config('row_security', 'off', true);
+  select exists(
+    select 1 from public.cafes
+    where id = cafe_id_param and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  return query
+  select 
+    extract(hour from o.created_at)::int as hour_of_day,
+    count(*)::bigint as orders_count,
+    coalesce(sum(o.total_credits), 0) as total_revenue,
+    coalesce(avg(o.total_credits), 0) as avg_order_value
+  from public.orders o
+  where o.cafe_id = cafe_id_param
+    and o.status in ('paid', 'preparing', 'ready', 'picked_up')
+    and o.created_at >= now() - (days_param || ' days')::interval
+  group by hour_of_day
+  order by hour_of_day;
+end;
+$$;
+
+-- RPC function to get customer retention stats for cafe owner
+create or replace function public.get_cafe_owner_customer_retention(
+  cafe_id_param uuid,
+  days_param int default 30
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result jsonb;
+  is_owner boolean;
+begin
+  -- Check if user is owner of this cafe
+  perform set_config('row_security', 'off', true);
+  select exists(
+    select 1 from public.cafes
+    where id = cafe_id_param and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  with customer_stats as (
+    select
+      count(distinct user_id) as total_customers,
+      count(distinct user_id) filter (
+        where user_id in (
+          select user_id from public.orders
+          where cafe_id = cafe_id_param
+          group by user_id
+          having count(*) > 1
+        )
+      ) as returning_customers,
+      avg(order_count) as avg_orders_per_customer
+    from (
+      select user_id, count(*) as order_count
+      from public.orders
+      where cafe_id = cafe_id_param
+        and created_at >= now() - (days_param || ' days')::interval
+        and status in ('paid', 'preparing', 'ready', 'picked_up')
+      group by user_id
+    ) user_orders
+  )
+  select jsonb_build_object(
+    'total_customers', cs.total_customers,
+    'returning_customers', cs.returning_customers,
+    'retention_rate', case when cs.total_customers > 0
+      then round((cs.returning_customers::numeric / cs.total_customers) * 100, 2)
+      else 0
+    end,
+    'avg_orders_per_customer', round(cs.avg_orders_per_customer, 2)
+  )
+  into result
+  from customer_stats cs;
+
+  return result;
+end;
+$$;
+
+-- RPC function to toggle menu item availability (stop-list management)
+create or replace function public.toggle_menu_item_availability(
+  item_id_param uuid,
+  is_active_param boolean
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item_cafe_id uuid;
+  is_owner boolean;
+begin
+  -- Get cafe_id for this menu item
+  perform set_config('row_security', 'off', true);
+  select cafe_id into item_cafe_id
+  from public.menu_items
+  where id = item_id_param;
+
+  if item_cafe_id is null then
+    raise exception 'Menu item not found';
+  end if;
+
+  -- Check if user is owner of this cafe
+  select exists(
+    select 1 from public.cafes
+    where id = item_cafe_id and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  -- Update availability
+  update public.menu_items
+  set is_active = is_active_param
+  where id = item_id_param;
+
+  return jsonb_build_object(
+    'success', true,
+    'item_id', item_id_param,
+    'is_active', is_active_param
+  );
+end;
+$$;
+
+-- Add stop_reason column to menu_items for stop-list tracking
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'menu_items' and column_name = 'stop_reason'
+  ) then
+    alter table public.menu_items add column stop_reason text;
+  end if;
+end$$;
+
+-- RPC function to update menu item stop reason
+create or replace function public.update_menu_item_stop_reason(
+  item_id_param uuid,
+  stop_reason_param text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  item_cafe_id uuid;
+  is_owner boolean;
+begin
+  -- Get cafe_id for this menu item
+  perform set_config('row_security', 'off', true);
+  select cafe_id into item_cafe_id
+  from public.menu_items
+  where id = item_id_param;
+
+  if item_cafe_id is null then
+    raise exception 'Menu item not found';
+  end if;
+
+  -- Check if user is owner of this cafe
+  select exists(
+    select 1 from public.cafes
+    where id = item_cafe_id and owner_id = auth.uid()
+  ) into is_owner;
+  
+  if not is_owner and not public.is_admin() then
+    raise exception 'Access denied: you are not the owner of this cafe';
+  end if;
+
+  -- Update stop reason
+  update public.menu_items
+  set 
+    stop_reason = stop_reason_param,
+    is_active = case when stop_reason_param is null or stop_reason_param = '' then true else false end
+  where id = item_id_param;
+
+  return jsonb_build_object(
+    'success', true,
+    'item_id', item_id_param,
+    'stop_reason', stop_reason_param
+  );
+end;
+$$;
+
+-- Comments
+comment on function public.is_cafe_owner(uuid) is 'Check if current user is owner of specified cafe';
+comment on function public.is_owner_role() is 'Check if current user has owner role';
+comment on function public.get_owner_cafes() is 'Get list of cafes owned by current user';
+comment on function public.get_cafe_owner_dashboard_metrics(uuid, text) is 'Get comprehensive dashboard metrics for cafe owner';
+comment on function public.get_cafe_owner_top_items(uuid, int, int) is 'Get top performing menu items for cafe owner';
+comment on function public.get_cafe_owner_hourly_stats(uuid, int) is 'Get hourly order distribution for cafe owner';
+comment on function public.get_cafe_owner_customer_retention(uuid, int) is 'Get customer retention statistics for cafe owner';
+comment on function public.toggle_menu_item_availability(uuid, boolean) is 'Toggle menu item availability (stop-list management)';
+comment on function public.update_menu_item_stop_reason(uuid, text) is 'Update menu item stop reason';

@@ -1,0 +1,337 @@
+import SwiftUI
+import AuthenticationServices
+
+struct OAuthManagementView: View {
+    @StateObject private var authService = AuthService()
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var showingAddProvider = false
+    @State private var isProcessing = false
+    @State private var statusMessage: String?
+    
+    var body: some View {
+        NavigationView {
+            Group {
+                if authService.isLoading {
+                    ProgressView("Загрузка...")
+                } else {
+                    List {
+                        // Current auth provider
+                        Section("Основной способ входа") {
+                            if let profile = authService.userProfile {
+                                HStack {
+                                    Image(systemName: providerIcon(profile.authProvider))
+                                        .foregroundColor(providerColor(profile.authProvider))
+                                    
+                                    VStack(alignment: .leading) {
+                                        Text(providerName(profile.authProvider))
+                                            .font(.headline)
+                                        
+                                        if let email = profile.email {
+                                            Text(email)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        } else if let phone = profile.phone {
+                                            Text(phone)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                }
+                            }
+                        }
+                        
+                        // Linked OAuth providers
+                        if let connections = authService.userProfile?.oauthConnections,
+                           !connections.isEmpty {
+                            Section("Привязанные аккаунты") {
+                                ForEach(connections) { connection in
+                                    HStack {
+                                        Image(systemName: providerIcon(connection.provider))
+                                            .foregroundColor(providerColor(connection.provider))
+                                        
+                                        VStack(alignment: .leading) {
+                                            Text(providerName(connection.provider))
+                                                .font(.headline)
+                                            
+                                            if let email = connection.providerEmail {
+                                                Text(email)
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                        
+                                        Spacer()
+                                        
+                                        if connection.isPrimary {
+                                            Text("Основной")
+                                                .font(.caption)
+                                                .foregroundColor(.green)
+                                        }
+                                        
+                                        Button {
+                                            Task {
+                                                await unlinkProvider(connection.provider)
+                                            }
+                                        } label: {
+                                            Image(systemName: "trash")
+                                                .foregroundColor(.red)
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .disabled(isProcessing)
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Add new provider
+                        Section("Добавить способ входа") {
+                            Button {
+                                showingAddProvider = true
+                            } label: {
+                                HStack {
+                                    Image(systemName: "plus.circle.fill")
+                                        .foregroundColor(.accentColor)
+                                    Text("Привязать новый аккаунт")
+                                }
+                            }
+                            .disabled(isProcessing)
+                        }
+                        
+                        // Info
+                        Section {
+                            Text("Вы можете привязать несколько способов входа к одному аккаунту. Это позволит вам входить в систему любым удобным способом.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        if let statusMessage {
+                            Section {
+                                Text(statusMessage)
+                                    .foregroundColor(statusMessage.hasPrefix("✓") ? .green : .red)
+                                    .font(.subheadline)
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("Способы входа")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Закрыть") {
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showingAddProvider) {
+                AddOAuthProviderView(onProviderAdded: {
+                    showingAddProvider = false
+                    Task {
+                        await authService.fetchUserProfile()
+                        statusMessage = "✓ Аккаунт успешно привязан"
+                    }
+                })
+            }
+            .overlay {
+                if isProcessing {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black.opacity(0.2))
+                }
+            }
+            .task {
+                await authService.checkSession()
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    
+    private func providerName(_ provider: String) -> String {
+        switch provider {
+        case "email": return "Email"
+        case "google": return "Google"
+        case "apple": return "Apple"
+        case "phone": return "Телефон"
+        case "facebook": return "Facebook"
+        case "github": return "GitHub"
+        default: return provider.capitalized
+        }
+    }
+    
+    private func providerIcon(_ provider: String) -> String {
+        switch provider {
+        case "email": return "envelope.fill"
+        case "google": return "globe"
+        case "apple": return "apple.logo"
+        case "phone": return "phone.fill"
+        case "facebook": return "f.circle.fill"
+        case "github": return "chevron.left.forwardslash.chevron.right"
+        default: return "person.circle.fill"
+        }
+    }
+    
+    private func providerColor(_ provider: String) -> Color {
+        switch provider {
+        case "email": return .blue
+        case "google": return .red
+        case "apple": return .black
+        case "phone": return .green
+        case "facebook": return .blue
+        case "github": return .purple
+        default: return .gray
+        }
+    }
+    
+    private func unlinkProvider(_ provider: String) async {
+        isProcessing = true
+        statusMessage = nil
+        defer { isProcessing = false }
+        
+        // Note: This would need to be implemented in AuthService
+        // For now, show a message
+        statusMessage = "Функция отвязки провайдера будет доступна после реализации на backend"
+        
+        // TODO: Implement unlink functionality
+        // try await authService.unlinkOAuthProvider(provider: provider)
+    }
+}
+
+struct AddOAuthProviderView: View {
+    @StateObject private var authService = AuthService()
+    @Environment(\.dismiss) private var dismiss
+    
+    let onProviderAdded: () -> Void
+    
+    @State private var isProcessing = false
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 24) {
+                Text("Выберите способ входа")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .padding(.top, 40)
+                
+                Text("Привяжите дополнительный способ входа к вашему аккаунту")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                
+                VStack(spacing: 16) {
+                    // Sign in with Apple
+                    SignInWithAppleButton(
+                        onRequest: { request in
+                            request.requestedScopes = [.fullName, .email]
+                        },
+                        onCompletion: { result in
+                            handleSignInWithAppleResult(result)
+                        }
+                    )
+                    .signInWithAppleButtonStyle(.black)
+                    .frame(height: 50)
+                    .cornerRadius(12)
+                    .disabled(isProcessing)
+                    
+                    // Sign in with Google
+                    Button {
+                        Task {
+                            await handleSignInWithGoogle()
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "globe")
+                            Text("Привязать Google")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.white)
+                        .foregroundColor(.black)
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+                    .disabled(isProcessing)
+                }
+                .padding(.horizontal)
+                
+                if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                
+                Spacer()
+            }
+            .navigationTitle("Добавить аккаунт")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+            }
+            .overlay {
+                if isProcessing {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black.opacity(0.2))
+                }
+            }
+        }
+    }
+    
+    private func handleSignInWithGoogle() async {
+        isProcessing = true
+        errorMessage = nil
+        defer { isProcessing = false }
+        
+        do {
+            try await authService.signInWithGoogle()
+            onProviderAdded()
+        } catch {
+            errorMessage = "Ошибка: \(error.localizedDescription)"
+        }
+    }
+    
+    private func handleSignInWithAppleResult(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authorization):
+            Task {
+                isProcessing = true
+                errorMessage = nil
+                defer { isProcessing = false }
+                
+                do {
+                    try await authService.signInWithApple(authorization: authorization)
+                    onProviderAdded()
+                } catch {
+                    errorMessage = "Ошибка: \(error.localizedDescription)"
+                }
+            }
+        case .failure(let error):
+            errorMessage = "Ошибка: \(error.localizedDescription)"
+        }
+    }
+}
+
+#Preview {
+    OAuthManagementView()
+}

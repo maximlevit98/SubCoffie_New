@@ -1,0 +1,102 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Backend specific
+SubscribeCoffieBackend/node_modules/
+SubscribeCoffieBackend/.env
+SubscribeCoffieBackend/.env.local
+SubscribeCoffieBackend/dist/
+SubscribeCoffieBackend/build/
+SubscribeCoffieBackend/logs/
+SubscribeCoffieBackend/backups/*.backup
+SubscribeCoffieBackend/backups/*.sql
+
+# iOS/Swift specific
+SubscribeCoffieClean/SubscribeCoffieClean.xcodeproj/xcuserdata/
+SubscribeCoffieClean/SubscribeCoffieClean.xcodeproj/project.xcworkspace/xcuserdata/
+SubscribeCoffieClean/*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+.swiftpm/
+
+# CocoaPods
+Pods/
+*.podspec
+
+# Carthage
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Admin panel (Next.js/React)
+subscribecoffie-admin/node_modules/
+subscribecoffie-admin/.next/
+subscribecoffie-admin/out/
+subscribecoffie-admin/build/
+subscribecoffie-admin/.env
+subscribecoffie-admin/.env.local
+subscribecoffie-admin/.env.production.local
+subscribecoffie-admin/.env.development.local
+subscribecoffie-admin/.vercel
+
+# Testing
+coverage/
+*.coverage
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Compiled files
+*.o
+*.so
+*.dylib

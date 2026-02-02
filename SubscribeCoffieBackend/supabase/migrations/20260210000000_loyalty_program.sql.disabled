@@ -1,0 +1,718 @@
+-- Migration: Loyalty Program and Gamification
+-- Description: Implements loyalty levels, achievements, and points system
+-- Date: 2026-02-10
+
+-- ============================================================================
+-- 1. Create loyalty_levels table
+-- ============================================================================
+
+create table if not exists public.loyalty_levels (
+  id uuid primary key default gen_random_uuid(),
+  level_name text unique not null, -- 'Bronze', 'Silver', 'Gold', 'Platinum'
+  level_order int unique not null, -- 1, 2, 3, 4
+  points_required int not null check (points_required >= 0),
+  cashback_percent decimal(5,2) default 0 check (cashback_percent >= 0 and cashback_percent <= 100),
+  benefits jsonb default '[]'::jsonb, -- Array of benefits as strings
+  badge_color text, -- Hex color for UI
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+comment on table public.loyalty_levels is 'Loyalty program tiers with benefits';
+comment on column public.loyalty_levels.benefits is 'JSON array of benefit descriptions';
+
+-- Enable RLS
+alter table public.loyalty_levels enable row level security;
+
+-- Policies for loyalty_levels
+create policy "Admin can manage loyalty levels"
+  on public.loyalty_levels for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+create policy "Public can view loyalty levels"
+  on public.loyalty_levels for select
+  using (true);
+
+-- Insert default loyalty levels
+insert into public.loyalty_levels (level_name, level_order, points_required, cashback_percent, benefits, badge_color)
+values
+  ('Bronze', 1, 0, 2.0, '["Welcome bonus: 50 points", "Birthday surprise"]'::jsonb, '#CD7F32'),
+  ('Silver', 2, 500, 5.0, '["All Bronze benefits", "5% cashback on orders", "Priority support"]'::jsonb, '#C0C0C0'),
+  ('Gold', 3, 1500, 10.0, '["All Silver benefits", "10% cashback on orders", "Free delivery on orders over 500₽", "Exclusive menu items"]'::jsonb, '#FFD700'),
+  ('Platinum', 4, 5000, 15.0, '["All Gold benefits", "15% cashback on orders", "Free delivery on all orders", "VIP support", "Early access to new cafes"]'::jsonb, '#E5E4E2')
+on conflict (level_name) do nothing;
+
+-- ============================================================================
+-- 2. Create user_loyalty table
+-- ============================================================================
+
+create table if not exists public.user_loyalty (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  current_level_id uuid references public.loyalty_levels(id) on delete set null,
+  total_points int default 0 check (total_points >= 0),
+  points_to_next_level int default 0,
+  lifetime_orders int default 0 check (lifetime_orders >= 0),
+  lifetime_spend_credits int default 0 check (lifetime_spend_credits >= 0),
+  current_streak_days int default 0 check (current_streak_days >= 0),
+  longest_streak_days int default 0 check (longest_streak_days >= 0),
+  last_order_date date,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+comment on table public.user_loyalty is 'User loyalty program status and progress';
+comment on column public.user_loyalty.current_streak_days is 'Current consecutive days with orders';
+comment on column public.user_loyalty.longest_streak_days is 'Longest streak ever achieved';
+
+-- Enable RLS
+alter table public.user_loyalty enable row level security;
+
+-- Policies for user_loyalty
+create policy "Users can view their own loyalty"
+  on public.user_loyalty for select
+  using (auth.uid() = user_id);
+
+create policy "Admin can view all loyalty"
+  on public.user_loyalty for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Index for lookups
+create index if not exists user_loyalty_level_idx on public.user_loyalty(current_level_id);
+create index if not exists user_loyalty_points_idx on public.user_loyalty(total_points desc);
+
+-- ============================================================================
+-- 3. Create achievements table
+-- ============================================================================
+
+create table if not exists public.achievements (
+  id uuid primary key default gen_random_uuid(),
+  achievement_key text unique not null, -- 'first_order', 'ten_orders', 'cafe_explorer'
+  title text not null,
+  description text not null,
+  icon text, -- Emoji or icon name
+  points_reward int default 0 check (points_reward >= 0),
+  achievement_type text not null check (achievement_type in ('order_count', 'cafe_count', 'spend', 'streak', 'special')),
+  requirement_value int, -- e.g., 10 for "10 orders"
+  is_hidden boolean default false, -- Hidden until unlocked
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+comment on table public.achievements is 'Available achievements in the loyalty program';
+comment on column public.achievements.achievement_key is 'Unique identifier for achievement logic';
+comment on column public.achievements.is_hidden is 'If true, not shown until unlocked';
+
+-- Enable RLS
+alter table public.achievements enable row level security;
+
+-- Policies for achievements
+create policy "Admin can manage achievements"
+  on public.achievements for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+create policy "Public can view non-hidden achievements"
+  on public.achievements for select
+  using (is_hidden = false or exists (
+    select 1 from public.user_achievements ua
+    where ua.achievement_id = achievements.id and ua.user_id = auth.uid()
+  ));
+
+-- Insert default achievements
+insert into public.achievements (achievement_key, title, description, icon, points_reward, achievement_type, requirement_value, is_hidden)
+values
+  ('first_order', 'First Order', 'Made your first order', '☕', 50, 'order_count', 1, false),
+  ('five_orders', 'Coffee Lover', 'Completed 5 orders', '☕☕', 100, 'order_count', 5, false),
+  ('ten_orders', 'Regular', 'Completed 10 orders', '☕☕☕', 200, 'order_count', 10, false),
+  ('fifty_orders', 'Coffee Addict', 'Completed 50 orders', '🏆', 500, 'order_count', 50, false),
+  ('hundred_orders', 'Coffee Master', 'Completed 100 orders', '👑', 1000, 'order_count', 100, false),
+  ('cafe_explorer', 'Cafe Explorer', 'Visited 5 different cafes', '🗺️', 150, 'cafe_count', 5, false),
+  ('cafe_connoisseur', 'Cafe Connoisseur', 'Visited 10 different cafes', '🌟', 300, 'cafe_count', 10, false),
+  ('big_spender', 'Big Spender', 'Spent 10,000 credits total', '💰', 400, 'spend', 10000, false),
+  ('week_streak', 'Week Warrior', 'Ordered coffee 7 days in a row', '🔥', 250, 'streak', 7, false),
+  ('month_streak', 'Monthly Champion', 'Ordered coffee 30 days in a row', '🔥🔥', 1000, 'streak', 30, false),
+  ('early_adopter', 'Early Adopter', 'One of the first users!', '🚀', 500, 'special', null, true),
+  ('night_owl', 'Night Owl', 'Ordered coffee after 10 PM', '🦉', 100, 'special', null, false),
+  ('morning_person', 'Morning Person', 'Ordered coffee before 7 AM', '🌅', 100, 'special', null, false)
+on conflict (achievement_key) do nothing;
+
+-- ============================================================================
+-- 4. Create user_achievements table
+-- ============================================================================
+
+create table if not exists public.user_achievements (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade not null,
+  achievement_id uuid references public.achievements(id) on delete cascade not null,
+  unlocked_at timestamp with time zone default now(),
+  notified boolean default false, -- Whether user has been notified
+  unique(user_id, achievement_id)
+);
+
+comment on table public.user_achievements is 'Achievements unlocked by users';
+comment on column public.user_achievements.notified is 'Whether push notification was sent';
+
+-- Enable RLS
+alter table public.user_achievements enable row level security;
+
+-- Policies for user_achievements
+create policy "Users can view their own achievements"
+  on public.user_achievements for select
+  using (auth.uid() = user_id);
+
+create policy "Admin can view all achievements"
+  on public.user_achievements for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Indexes
+create index if not exists user_achievements_user_id_idx on public.user_achievements(user_id);
+create index if not exists user_achievements_achievement_id_idx on public.user_achievements(achievement_id);
+create index if not exists user_achievements_unlocked_at_idx on public.user_achievements(unlocked_at desc);
+
+-- ============================================================================
+-- 5. Create loyalty_points_history table (audit trail)
+-- ============================================================================
+
+create table if not exists public.loyalty_points_history (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade not null,
+  points_change int not null, -- Can be positive or negative
+  reason text not null, -- 'order_completed', 'achievement_unlocked', 'admin_adjustment'
+  order_id uuid references public.orders_core(id) on delete set null,
+  achievement_id uuid references public.achievements(id) on delete set null,
+  notes text,
+  created_at timestamp with time zone default now()
+);
+
+comment on table public.loyalty_points_history is 'Audit trail of all loyalty points changes';
+
+-- Enable RLS
+alter table public.loyalty_points_history enable row level security;
+
+-- Policies for loyalty_points_history
+create policy "Users can view their own points history"
+  on public.loyalty_points_history for select
+  using (auth.uid() = user_id);
+
+create policy "Admin can view all points history"
+  on public.loyalty_points_history for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Index
+create index if not exists loyalty_points_history_user_id_idx on public.loyalty_points_history(user_id);
+create index if not exists loyalty_points_history_created_at_idx on public.loyalty_points_history(created_at desc);
+
+-- ============================================================================
+-- 6. RPC Functions
+-- ============================================================================
+
+-- Function: Initialize user loyalty (called automatically)
+create or replace function public.initialize_user_loyalty(p_user_id uuid)
+returns void
+language plpgsql
+security definer
+as $$
+declare
+  v_bronze_level_id uuid;
+begin
+  -- Check if already initialized
+  if exists (select 1 from public.user_loyalty where user_id = p_user_id) then
+    return;
+  end if;
+
+  -- Get Bronze level
+  select id into v_bronze_level_id
+  from public.loyalty_levels
+  where level_order = 1
+  order by level_order
+  limit 1;
+
+  -- Create loyalty record
+  insert into public.user_loyalty (user_id, current_level_id, total_points, points_to_next_level)
+  values (
+    p_user_id,
+    v_bronze_level_id,
+    0,
+    (select points_required from public.loyalty_levels where level_order = 2)
+  );
+end;
+$$;
+
+-- Function: Calculate loyalty points for an order
+create or replace function public.calculate_loyalty_points(p_order_amount int)
+returns int
+language plpgsql
+security definer
+as $$
+begin
+  -- Award 1 point per 10 credits spent
+  return greatest(floor(p_order_amount / 10.0), 1);
+end;
+$$;
+
+-- Function: Award loyalty points
+create or replace function public.award_loyalty_points(
+  p_user_id uuid,
+  p_points int,
+  p_reason text,
+  p_order_id uuid default null,
+  p_achievement_id uuid default null,
+  p_notes text default null
+)
+returns void
+language plpgsql
+security definer
+as $$
+begin
+  -- Initialize loyalty if needed
+  perform public.initialize_user_loyalty(p_user_id);
+
+  -- Update user loyalty points
+  update public.user_loyalty
+  set
+    total_points = total_points + p_points,
+    updated_at = now()
+  where user_id = p_user_id;
+
+  -- Record in history
+  insert into public.loyalty_points_history (user_id, points_change, reason, order_id, achievement_id, notes)
+  values (p_user_id, p_points, p_reason, p_order_id, p_achievement_id, p_notes);
+
+  -- Check for level upgrade
+  perform public.check_and_upgrade_loyalty_level(p_user_id);
+end;
+$$;
+
+-- Function: Check and upgrade loyalty level
+create or replace function public.check_and_upgrade_loyalty_level(p_user_id uuid)
+returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_current_points int;
+  v_current_level_order int;
+  v_new_level_id uuid;
+  v_new_level_name text;
+  v_new_level_order int;
+  v_next_level_points int;
+  v_upgraded boolean := false;
+begin
+  -- Get current status
+  select ul.total_points, ll.level_order
+  into v_current_points, v_current_level_order
+  from public.user_loyalty ul
+  join public.loyalty_levels ll on ul.current_level_id = ll.id
+  where ul.user_id = p_user_id;
+
+  -- Find highest level user qualifies for
+  select id, level_name, level_order
+  into v_new_level_id, v_new_level_name, v_new_level_order
+  from public.loyalty_levels
+  where points_required <= v_current_points
+  order by level_order desc
+  limit 1;
+
+  -- Check if upgrade needed
+  if v_new_level_order > v_current_level_order then
+    v_upgraded := true;
+
+    -- Get next level points (or null if max level)
+    select points_required into v_next_level_points
+    from public.loyalty_levels
+    where level_order = v_new_level_order + 1;
+
+    -- Update user level
+    update public.user_loyalty
+    set
+      current_level_id = v_new_level_id,
+      points_to_next_level = coalesce(v_next_level_points - v_current_points, 0),
+      updated_at = now()
+    where user_id = p_user_id;
+
+    -- Award points for level up
+    perform public.award_loyalty_points(
+      p_user_id,
+      100 * v_new_level_order, -- Bonus points: 200 for Silver, 300 for Gold, etc.
+      'level_upgrade',
+      null,
+      null,
+      format('Upgraded to %s level', v_new_level_name)
+    );
+  else
+    -- Just update points to next level
+    select points_required into v_next_level_points
+    from public.loyalty_levels
+    where level_order = v_current_level_order + 1;
+
+    update public.user_loyalty
+    set points_to_next_level = coalesce(v_next_level_points - v_current_points, 0)
+    where user_id = p_user_id;
+  end if;
+
+  return jsonb_build_object(
+    'upgraded', v_upgraded,
+    'new_level', v_new_level_name,
+    'current_points', v_current_points
+  );
+end;
+$$;
+
+-- Function: Check and unlock achievements
+create or replace function public.check_and_unlock_achievements(p_user_id uuid)
+returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_achievement record;
+  v_unlocked_count int := 0;
+  v_unlocked_achievements jsonb := '[]'::jsonb;
+  v_user_stats record;
+begin
+  -- Get user stats
+  select
+    ul.lifetime_orders,
+    ul.lifetime_spend_credits,
+    ul.current_streak_days,
+    count(distinct o.cafe_id) as unique_cafes
+  into v_user_stats
+  from public.user_loyalty ul
+  left join public.orders_core o on o.user_id = ul.user_id and o.status = 'issued'
+  where ul.user_id = p_user_id
+  group by ul.lifetime_orders, ul.lifetime_spend_credits, ul.current_streak_days;
+
+  -- Check each achievement type
+  for v_achievement in
+    select a.*
+    from public.achievements a
+    where not exists (
+      select 1 from public.user_achievements ua
+      where ua.user_id = p_user_id and ua.achievement_id = a.id
+    )
+  loop
+    declare
+      v_should_unlock boolean := false;
+    begin
+      case v_achievement.achievement_type
+        when 'order_count' then
+          v_should_unlock := v_user_stats.lifetime_orders >= v_achievement.requirement_value;
+        when 'cafe_count' then
+          v_should_unlock := v_user_stats.unique_cafes >= v_achievement.requirement_value;
+        when 'spend' then
+          v_should_unlock := v_user_stats.lifetime_spend_credits >= v_achievement.requirement_value;
+        when 'streak' then
+          v_should_unlock := v_user_stats.current_streak_days >= v_achievement.requirement_value;
+        else
+          -- Special achievements handled separately
+          v_should_unlock := false;
+      end case;
+
+      if v_should_unlock then
+        -- Unlock achievement
+        insert into public.user_achievements (user_id, achievement_id, notified)
+        values (p_user_id, v_achievement.id, false);
+
+        -- Award points
+        if v_achievement.points_reward > 0 then
+          perform public.award_loyalty_points(
+            p_user_id,
+            v_achievement.points_reward,
+            'achievement_unlocked',
+            null,
+            v_achievement.id,
+            format('Unlocked: %s', v_achievement.title)
+          );
+        end if;
+
+        v_unlocked_count := v_unlocked_count + 1;
+        v_unlocked_achievements := v_unlocked_achievements || jsonb_build_object(
+          'id', v_achievement.id,
+          'title', v_achievement.title,
+          'points', v_achievement.points_reward
+        );
+      end if;
+    end;
+  end loop;
+
+  return jsonb_build_object(
+    'unlocked_count', v_unlocked_count,
+    'achievements', v_unlocked_achievements
+  );
+end;
+$$;
+
+-- Function: Get user loyalty dashboard
+create or replace function public.get_loyalty_dashboard(p_user_id uuid)
+returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_result jsonb;
+begin
+  -- Initialize if needed
+  perform public.initialize_user_loyalty(p_user_id);
+
+  -- Build dashboard
+  select jsonb_build_object(
+    'user_loyalty', row_to_json(ul.*),
+    'current_level', row_to_json(ll.*),
+    'unlocked_achievements', (
+      select coalesce(jsonb_agg(
+        jsonb_build_object(
+          'achievement', row_to_json(a.*),
+          'unlocked_at', ua.unlocked_at
+        )
+      ), '[]'::jsonb)
+      from public.user_achievements ua
+      join public.achievements a on ua.achievement_id = a.id
+      where ua.user_id = p_user_id
+      order by ua.unlocked_at desc
+    ),
+    'locked_achievements', (
+      select coalesce(jsonb_agg(row_to_json(a.*)), '[]'::jsonb)
+      from public.achievements a
+      where not exists (
+        select 1 from public.user_achievements ua
+        where ua.user_id = p_user_id and ua.achievement_id = a.id
+      )
+      and a.is_hidden = false
+      order by a.points_reward desc
+    ),
+    'recent_points_history', (
+      select coalesce(jsonb_agg(row_to_json(lph.*)), '[]'::jsonb)
+      from (
+        select * from public.loyalty_points_history
+        where user_id = p_user_id
+        order by created_at desc
+        limit 20
+      ) lph
+    )
+  ) into v_result
+  from public.user_loyalty ul
+  left join public.loyalty_levels ll on ul.current_level_id = ll.id
+  where ul.user_id = p_user_id;
+
+  return v_result;
+end;
+$$;
+
+-- Function: Get loyalty leaderboard
+create or replace function public.get_loyalty_leaderboard(p_limit int default 100)
+returns table(
+  rank bigint,
+  user_id uuid,
+  total_points int,
+  level_name text,
+  lifetime_orders int
+)
+language plpgsql
+security definer
+as $$
+begin
+  return query
+  select
+    row_number() over (order by ul.total_points desc) as rank,
+    ul.user_id,
+    ul.total_points,
+    ll.level_name,
+    ul.lifetime_orders
+  from public.user_loyalty ul
+  join public.loyalty_levels ll on ul.current_level_id = ll.id
+  order by ul.total_points desc
+  limit p_limit;
+end;
+$$;
+
+-- ============================================================================
+-- 7. Triggers
+-- ============================================================================
+
+-- Trigger: Award points and update stats when order is issued
+create or replace function public.trigger_order_issued_loyalty()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  v_points_earned int;
+  v_order_date date;
+  v_last_order_date date;
+  v_days_diff int;
+begin
+  -- Only process when status changes to 'issued'
+  if NEW.status = 'issued' and (OLD.status is null or OLD.status != 'issued') then
+    -- Calculate points
+    v_points_earned := public.calculate_loyalty_points(NEW.paid_credits);
+
+    -- Award points
+    perform public.award_loyalty_points(
+      NEW.user_id,
+      v_points_earned,
+      'order_completed',
+      NEW.id,
+      null,
+      format('Order #%s completed', NEW.id)
+    );
+
+    -- Update order stats
+    v_order_date := date_trunc('day', NEW.created_at)::date;
+
+    select last_order_date into v_last_order_date
+    from public.user_loyalty
+    where user_id = NEW.user_id;
+
+    -- Calculate streak
+    if v_last_order_date is null then
+      -- First order
+      v_days_diff := 0;
+    else
+      v_days_diff := v_order_date - v_last_order_date;
+    end if;
+
+    update public.user_loyalty
+    set
+      lifetime_orders = lifetime_orders + 1,
+      lifetime_spend_credits = lifetime_spend_credits + NEW.paid_credits,
+      last_order_date = v_order_date,
+      current_streak_days = case
+        when v_days_diff = 1 then current_streak_days + 1  -- Consecutive day
+        when v_days_diff = 0 then current_streak_days       -- Same day
+        else 1                                               -- Streak broken, reset to 1
+      end,
+      longest_streak_days = greatest(
+        longest_streak_days,
+        case
+          when v_days_diff = 1 then current_streak_days + 1
+          when v_days_diff = 0 then current_streak_days
+          else 1
+        end
+      ),
+      updated_at = now()
+    where user_id = NEW.user_id;
+
+    -- Check for new achievements
+    perform public.check_and_unlock_achievements(NEW.user_id);
+
+    -- Check for special time-based achievements
+    declare
+      v_order_hour int := extract(hour from NEW.created_at);
+      v_early_adopter_achievement_id uuid;
+      v_night_owl_achievement_id uuid;
+      v_morning_person_achievement_id uuid;
+    begin
+      -- Night Owl (after 10 PM)
+      if v_order_hour >= 22 then
+        select id into v_night_owl_achievement_id
+        from public.achievements
+        where achievement_key = 'night_owl';
+
+        if not exists (
+          select 1 from public.user_achievements
+          where user_id = NEW.user_id and achievement_id = v_night_owl_achievement_id
+        ) then
+          insert into public.user_achievements (user_id, achievement_id)
+          values (NEW.user_id, v_night_owl_achievement_id);
+
+          perform public.award_loyalty_points(
+            NEW.user_id,
+            100,
+            'achievement_unlocked',
+            null,
+            v_night_owl_achievement_id,
+            'Unlocked: Night Owl'
+          );
+        end if;
+      end if;
+
+      -- Morning Person (before 7 AM)
+      if v_order_hour < 7 then
+        select id into v_morning_person_achievement_id
+        from public.achievements
+        where achievement_key = 'morning_person';
+
+        if not exists (
+          select 1 from public.user_achievements
+          where user_id = NEW.user_id and achievement_id = v_morning_person_achievement_id
+        ) then
+          insert into public.user_achievements (user_id, achievement_id)
+          values (NEW.user_id, v_morning_person_achievement_id);
+
+          perform public.award_loyalty_points(
+            NEW.user_id,
+            100,
+            'achievement_unlocked',
+            null,
+            v_morning_person_achievement_id,
+            'Unlocked: Morning Person'
+          );
+        end if;
+      end if;
+    end;
+  end if;
+
+  return NEW;
+end;
+$$;
+
+-- Create trigger on orders_core
+drop trigger if exists trigger_order_issued_loyalty on public.orders_core;
+create trigger trigger_order_issued_loyalty
+  after insert or update on public.orders_core
+  for each row
+  execute function public.trigger_order_issued_loyalty();
+
+-- ============================================================================
+-- 8. Grant permissions
+-- ============================================================================
+
+grant select on public.loyalty_levels to authenticated;
+grant select on public.user_loyalty to authenticated;
+grant select on public.achievements to authenticated;
+grant select on public.user_achievements to authenticated;
+grant select on public.loyalty_points_history to authenticated;
+
+grant execute on function public.initialize_user_loyalty to authenticated;
+grant execute on function public.calculate_loyalty_points to authenticated;
+grant execute on function public.award_loyalty_points to authenticated;
+grant execute on function public.check_and_upgrade_loyalty_level to authenticated;
+grant execute on function public.check_and_unlock_achievements to authenticated;
+grant execute on function public.get_loyalty_dashboard to authenticated;
+grant execute on function public.get_loyalty_leaderboard to authenticated;
+
+-- ============================================================================
+-- 9. Comments
+-- ============================================================================
+
+comment on function public.initialize_user_loyalty is 'Initialize loyalty program for new user';
+comment on function public.calculate_loyalty_points is 'Calculate points earned from order amount';
+comment on function public.award_loyalty_points is 'Award loyalty points to user with audit trail';
+comment on function public.check_and_upgrade_loyalty_level is 'Check if user qualifies for level upgrade';
+comment on function public.check_and_unlock_achievements is 'Check and unlock eligible achievements';
+comment on function public.get_loyalty_dashboard is 'Get complete loyalty dashboard for user';
+comment on function public.get_loyalty_leaderboard is 'Get top users by loyalty points';

@@ -1,0 +1,592 @@
+import SwiftUI
+
+// MARK: - Create Shared Order View
+struct CreateSharedOrderView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var socialService = SocialService()
+    
+    let orderId: UUID
+    let totalAmount: Int
+    
+    @State private var participants: [ParticipantInput] = []
+    @State private var showAddParticipant = false
+    @State private var isCreating = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    @State private var showSuccess = false
+    
+    struct ParticipantInput: Identifiable {
+        let id = UUID()
+        var friendId: UUID?
+        var friendName: String = ""
+        var shareAmount: Int = 0
+    }
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 24) {
+                    // Header
+                    VStack(spacing: 12) {
+                        Image(systemName: "person.3.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(.blue)
+                        
+                        Text("Групповой заказ")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("Разделите оплату с друзьями")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top)
+                    
+                    // Total Amount
+                    VStack(spacing: 8) {
+                        Text("Общая сумма")
+                            .font(.headline)
+                        
+                        Text("\(totalAmount) ₽")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.blue)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(16)
+                    
+                    // Participants List
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Участники")
+                                .font(.headline)
+                            
+                            Spacer()
+                            
+                            Button {
+                                showAddParticipant = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("Добавить")
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
+                            }
+                        }
+                        
+                        if participants.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "person.2.slash")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.gray)
+                                
+                                Text("Добавьте участников")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
+                        } else {
+                            ForEach(participants.indices, id: \.self) { index in
+                                ParticipantRow(
+                                    participant: $participants[index],
+                                    onRemove: {
+                                        participants.remove(at: index)
+                                    }
+                                )
+                            }
+                        }
+                        
+                        // Remaining Amount
+                        HStack {
+                            Text("Осталось распределить:")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Text("\(remainingAmount) ₽")
+                                .font(.headline)
+                                .foregroundColor(remainingAmount == 0 ? .green : .orange)
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                    }
+                    
+                    // Create Button
+                    Button {
+                        Task { await createSharedOrder() }
+                    } label: {
+                        HStack {
+                            if isCreating {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            } else {
+                                Text("Создать групповой заказ")
+                                    .fontWeight(.semibold)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(isCreateButtonEnabled ? Color.blue : Color.gray)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                    .disabled(!isCreateButtonEnabled || isCreating)
+                    
+                    Spacer()
+                }
+                .padding()
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $showAddParticipant) {
+                AddParticipantView { participant in
+                    participants.append(participant)
+                }
+            }
+            .alert("Ошибка", isPresented: $showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage)
+            }
+            .alert("Успех!", isPresented: $showSuccess) {
+                Button("OK") {
+                    dismiss()
+                }
+            } message: {
+                Text("Групповой заказ создан. Участники получат уведомления.")
+            }
+        }
+    }
+    
+    private var remainingAmount: Int {
+        totalAmount - participants.reduce(0) { $0 + $1.shareAmount }
+    }
+    
+    private var isCreateButtonEnabled: Bool {
+        !participants.isEmpty && remainingAmount == 0 && !isCreating
+    }
+    
+    private func createSharedOrder() async {
+        isCreating = true
+        
+        do {
+            let participantInputs = participants.compactMap { participant -> SharedOrderParticipantInput? in
+                guard let friendId = participant.friendId, participant.shareAmount > 0 else {
+                    return nil
+                }
+                return SharedOrderParticipantInput(
+                    userId: friendId,
+                    shareAmountCredits: participant.shareAmount
+                )
+            }
+            
+            _ = try await socialService.createSharedOrder(
+                orderId: orderId,
+                participants: participantInputs
+            )
+            
+            showSuccess = true
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+        
+        isCreating = false
+    }
+}
+
+// MARK: - Participant Row
+struct ParticipantRow: View {
+    @Binding var participant: CreateSharedOrderView.ParticipantInput
+    let onRemove: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Avatar
+            Circle()
+                .fill(Color.blue.opacity(0.2))
+                .frame(width: 40, height: 40)
+                .overlay(
+                    Image(systemName: "person.fill")
+                        .foregroundColor(.blue)
+                )
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(participant.friendName.isEmpty ? "Участник" : participant.friendName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                TextField("Сумма", value: $participant.shareAmount, format: .number)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.numberPad)
+                    .frame(width: 100)
+            }
+            
+            Spacer()
+            
+            Text("\(participant.shareAmount) ₽")
+                .font(.headline)
+                .foregroundColor(.blue)
+            
+            Button {
+                onRemove()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - Add Participant View
+struct AddParticipantView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var socialService = SocialService()
+    
+    let onAdd: (CreateSharedOrderView.ParticipantInput) -> Void
+    
+    @State private var friends: [FriendInfo] = []
+    @State private var isLoading = true
+    @State private var selectedFriend: FriendInfo?
+    
+    var body: some View {
+        NavigationView {
+            Group {
+                if isLoading {
+                    ProgressView()
+                } else if friends.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "person.2.slash")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                        
+                        Text("Нет друзей")
+                            .font(.headline)
+                        
+                        Text("Добавьте друзей, чтобы создавать групповые заказы")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                } else {
+                    List(friends) { friend in
+                        Button {
+                            let participant = CreateSharedOrderView.ParticipantInput(
+                                friendId: friend.friendId,
+                                friendName: "Друг",
+                                shareAmount: 0
+                            )
+                            onAdd(participant)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Circle()
+                                    .fill(Color.blue.opacity(0.2))
+                                    .frame(width: 40, height: 40)
+                                    .overlay(
+                                        Image(systemName: "person.fill")
+                                            .foregroundColor(.blue)
+                                    )
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Друг")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                    
+                                    Text("Друзья с \(friend.acceptedAt ?? friend.createdAt, style: .date)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Spacer()
+                                
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Выберите друга")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await loadFriends()
+            }
+        }
+    }
+    
+    private func loadFriends() async {
+        isLoading = true
+        
+        do {
+            friends = try await socialService.getUserFriends(status: "accepted")
+        } catch {
+            Logger.error("Failed to load friends: \(error)")
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Friends List View
+struct FriendsListView: View {
+    @StateObject private var socialService = SocialService()
+    @State private var selectedTab = 0
+    @State private var isLoading = true
+    @State private var showError = false
+    @State private var errorMessage = ""
+    
+    var acceptedFriends: [FriendInfo] {
+        socialService.friends.filter { $0.status == .accepted }
+    }
+    
+    var pendingRequests: [FriendInfo] {
+        socialService.friends.filter { $0.status == .pending && !$0.isInitiator }
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Segmented Control
+                Picker("", selection: $selectedTab) {
+                    Text("Друзья").tag(0)
+                    Text("Запросы (\(pendingRequests.count))").tag(1)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+                
+                // Content
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    if selectedTab == 0 {
+                        FriendsAcceptedListView(friends: acceptedFriends)
+                    } else {
+                        FriendRequestsListView(
+                            requests: pendingRequests,
+                            onRespond: { requestId, accept in
+                                Task { await respondToRequest(requestId: requestId, accept: accept) }
+                            }
+                        )
+                    }
+                }
+            }
+            .navigationTitle("Друзья")
+            .navigationBarTitleDisplayMode(.inline)
+            .task {
+                await loadFriends()
+            }
+            .refreshable {
+                await loadFriends()
+            }
+            .alert("Ошибка", isPresented: $showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage)
+            }
+        }
+    }
+    
+    private func loadFriends() async {
+        isLoading = true
+        
+        do {
+            _ = try await socialService.getUserFriends(status: "all")
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+        
+        isLoading = false
+    }
+    
+    private func respondToRequest(requestId: UUID, accept: Bool) async {
+        do {
+            try await socialService.respondToFriendRequest(requestId: requestId, accept: accept)
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+}
+
+// MARK: - Friends Accepted List
+struct FriendsAcceptedListView: View {
+    let friends: [FriendInfo]
+    
+    var body: some View {
+        ScrollView {
+            if friends.isEmpty {
+                EmptyStateView(
+                    icon: "person.2.slash",
+                    title: "Нет друзей",
+                    message: "Добавьте друзей, чтобы делиться заказами"
+                )
+                .padding()
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(friends) { friend in
+                        FriendCardView(friend: friend)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.vertical)
+            }
+        }
+    }
+}
+
+// MARK: - Friend Card View
+struct FriendCardView: View {
+    let friend: FriendInfo
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(Color.blue.opacity(0.2))
+                .frame(width: 50, height: 50)
+                .overlay(
+                    Image(systemName: "person.fill")
+                        .foregroundColor(.blue)
+                )
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Друг")
+                    .font(.headline)
+                
+                Text("Друзья с \(friend.acceptedAt ?? friend.createdAt, style: .date)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - Friend Requests List
+struct FriendRequestsListView: View {
+    let requests: [FriendInfo]
+    let onRespond: (UUID, Bool) -> Void
+    
+    var body: some View {
+        ScrollView {
+            if requests.isEmpty {
+                EmptyStateView(
+                    icon: "envelope.open",
+                    title: "Нет запросов",
+                    message: "У вас нет новых запросов в друзья"
+                )
+                .padding()
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(requests) { request in
+                        FriendRequestCardView(
+                            request: request,
+                            onRespond: onRespond
+                        )
+                        .padding(.horizontal)
+                    }
+                }
+                .padding(.vertical)
+            }
+        }
+    }
+}
+
+// MARK: - Friend Request Card
+struct FriendRequestCardView: View {
+    let request: FriendInfo
+    let onRespond: (UUID, Bool) -> Void
+    
+    @State private var isResponding = false
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(Color.blue.opacity(0.2))
+                    .frame(width: 50, height: 50)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .foregroundColor(.blue)
+                    )
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Запрос в друзья")
+                        .font(.headline)
+                    
+                    Text(request.createdAt, style: .relative)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+            }
+            
+            HStack(spacing: 12) {
+                Button {
+                    isResponding = true
+                    onRespond(request.requestId, false)
+                } label: {
+                    Text("Отклонить")
+                        .fontWeight(.medium)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color(.systemGray5))
+                        .foregroundColor(.primary)
+                        .cornerRadius(10)
+                }
+                .disabled(isResponding)
+                
+                Button {
+                    isResponding = true
+                    onRespond(request.requestId, true)
+                } label: {
+                    Text("Принять")
+                        .fontWeight(.medium)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+                .disabled(isResponding)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - Preview
+#Preview {
+    CreateSharedOrderView(orderId: UUID(), totalAmount: 500)
+}

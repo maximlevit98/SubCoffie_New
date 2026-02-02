@@ -1,0 +1,989 @@
+-- Migration: Delivery System and Couriers
+-- Description: Adds delivery functionality with courier management and tracking
+
+-- ============================================================================
+-- ENUMS
+-- ============================================================================
+
+-- Courier status enum
+CREATE TYPE courier_status AS ENUM (
+  'available',      -- Ready to take orders
+  'busy',           -- Currently on delivery
+  'offline',        -- Not working
+  'on_break'        -- Taking a break
+);
+
+-- Delivery status enum
+CREATE TYPE delivery_status AS ENUM (
+  'pending',        -- Waiting for courier assignment
+  'assigned',       -- Courier assigned
+  'picked_up',      -- Order picked up from cafe
+  'in_transit',     -- On the way to customer
+  'delivered',      -- Successfully delivered
+  'failed',         -- Delivery failed
+  'cancelled'       -- Delivery cancelled
+);
+
+-- Vehicle type enum
+CREATE TYPE vehicle_type AS ENUM (
+  'bicycle',
+  'scooter',
+  'motorcycle',
+  'car',
+  'on_foot'
+);
+
+-- ============================================================================
+-- TABLES
+-- ============================================================================
+
+-- Couriers table
+CREATE TABLE couriers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  email TEXT,
+  vehicle_type vehicle_type NOT NULL DEFAULT 'bicycle',
+  license_plate TEXT,
+  status courier_status NOT NULL DEFAULT 'offline',
+  rating DECIMAL(3,2) DEFAULT 5.0 CHECK (rating >= 0 AND rating <= 5),
+  total_deliveries INTEGER DEFAULT 0,
+  completed_deliveries INTEGER DEFAULT 0,
+  failed_deliveries INTEGER DEFAULT 0,
+  is_verified BOOLEAN DEFAULT false,
+  is_active BOOLEAN DEFAULT true,
+  current_location_lat DECIMAL(10,7),
+  current_location_lon DECIMAL(10,7),
+  last_location_update TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Courier locations history (for tracking)
+CREATE TABLE courier_locations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  courier_id UUID REFERENCES couriers(id) ON DELETE CASCADE NOT NULL,
+  latitude DECIMAL(10,7) NOT NULL,
+  longitude DECIMAL(10,7) NOT NULL,
+  accuracy DECIMAL(10,2), -- in meters
+  speed DECIMAL(10,2), -- in km/h
+  heading DECIMAL(5,2), -- 0-360 degrees
+  recorded_at TIMESTAMPTZ DEFAULT NOW(),
+  delivery_order_id UUID, -- if location is during delivery
+  CONSTRAINT valid_latitude CHECK (latitude >= -90 AND latitude <= 90),
+  CONSTRAINT valid_longitude CHECK (longitude >= -180 AND longitude <= 180)
+);
+
+-- Create index for location queries
+CREATE INDEX idx_courier_locations_courier_id ON courier_locations(courier_id);
+CREATE INDEX idx_courier_locations_recorded_at ON courier_locations(recorded_at DESC);
+CREATE INDEX idx_courier_locations_delivery_order_id ON courier_locations(delivery_order_id) WHERE delivery_order_id IS NOT NULL;
+
+-- Delivery orders table
+CREATE TABLE delivery_orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID REFERENCES orders(id) ON DELETE CASCADE NOT NULL UNIQUE,
+  courier_id UUID REFERENCES couriers(id) ON DELETE SET NULL,
+  
+  -- Delivery address
+  delivery_address TEXT NOT NULL,
+  delivery_latitude DECIMAL(10,7) NOT NULL,
+  delivery_longitude DECIMAL(10,7) NOT NULL,
+  delivery_notes TEXT,
+  
+  -- Customer contact
+  customer_phone TEXT NOT NULL,
+  customer_name TEXT,
+  
+  -- Delivery details
+  status delivery_status NOT NULL DEFAULT 'pending',
+  delivery_fee_credits INTEGER NOT NULL DEFAULT 0,
+  distance_km DECIMAL(5,2), -- calculated distance
+  estimated_delivery_time INTERVAL, -- e.g., '30 minutes'
+  
+  -- Timestamps
+  assigned_at TIMESTAMPTZ,
+  picked_up_at TIMESTAMPTZ,
+  in_transit_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  failed_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  
+  -- Failure/cancellation reason
+  failure_reason TEXT,
+  cancellation_reason TEXT,
+  
+  -- Ratings
+  courier_rating INTEGER CHECK (courier_rating >= 1 AND courier_rating <= 5),
+  courier_feedback TEXT,
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  CONSTRAINT valid_delivery_latitude CHECK (delivery_latitude >= -90 AND delivery_latitude <= 90),
+  CONSTRAINT valid_delivery_longitude CHECK (delivery_longitude >= -180 AND delivery_longitude <= 180)
+);
+
+-- Create indexes
+CREATE INDEX idx_delivery_orders_order_id ON delivery_orders(order_id);
+CREATE INDEX idx_delivery_orders_courier_id ON delivery_orders(courier_id);
+CREATE INDEX idx_delivery_orders_status ON delivery_orders(status);
+CREATE INDEX idx_delivery_orders_created_at ON delivery_orders(created_at DESC);
+
+-- Delivery zones table (for calculating delivery fees)
+CREATE TABLE delivery_zones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cafe_id UUID REFERENCES cafes(id) ON DELETE CASCADE NOT NULL,
+  name TEXT NOT NULL,
+  
+  -- Zone can be defined as radius or polygon
+  zone_type TEXT NOT NULL CHECK (zone_type IN ('radius', 'polygon')),
+  
+  -- For radius zones
+  center_latitude DECIMAL(10,7),
+  center_longitude DECIMAL(10,7),
+  radius_km DECIMAL(5,2),
+  
+  -- For polygon zones (stored as GeoJSON or array of points)
+  polygon_coordinates JSONB,
+  
+  -- Pricing
+  base_delivery_fee_credits INTEGER NOT NULL DEFAULT 5000, -- 50 rubles = 5000 credits
+  fee_per_km_credits INTEGER DEFAULT 1000, -- 10 rubles per km = 1000 credits
+  min_order_amount_credits INTEGER DEFAULT 30000, -- minimum order for delivery
+  free_delivery_threshold_credits INTEGER, -- free delivery above this amount
+  
+  -- Zone settings
+  is_active BOOLEAN DEFAULT true,
+  max_delivery_time_minutes INTEGER DEFAULT 60,
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_delivery_zones_cafe_id ON delivery_zones(cafe_id);
+CREATE INDEX idx_delivery_zones_is_active ON delivery_zones(is_active) WHERE is_active = true;
+
+-- Courier earnings/payouts table
+CREATE TABLE courier_payouts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  courier_id UUID REFERENCES couriers(id) ON DELETE CASCADE NOT NULL,
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  total_deliveries INTEGER NOT NULL DEFAULT 0,
+  total_earnings_credits INTEGER NOT NULL DEFAULT 0,
+  platform_commission_credits INTEGER NOT NULL DEFAULT 0,
+  net_payout_credits INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'paid', 'failed')),
+  paid_at TIMESTAMPTZ,
+  payment_method TEXT,
+  payment_reference TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_courier_payouts_courier_id ON courier_payouts(courier_id);
+CREATE INDEX idx_courier_payouts_status ON courier_payouts(status);
+CREATE INDEX idx_courier_payouts_period ON courier_payouts(period_start, period_end);
+
+-- ============================================================================
+-- TRIGGERS
+-- ============================================================================
+
+-- Update couriers.updated_at on changes
+CREATE TRIGGER update_couriers_updated_at
+  BEFORE UPDATE ON couriers
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Update delivery_orders.updated_at on changes
+CREATE TRIGGER update_delivery_orders_updated_at
+  BEFORE UPDATE ON delivery_orders
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Update delivery_zones.updated_at on changes
+CREATE TRIGGER update_delivery_zones_updated_at
+  BEFORE UPDATE ON delivery_zones
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Update courier_payouts.updated_at on changes
+CREATE TRIGGER update_courier_payouts_updated_at
+  BEFORE UPDATE ON courier_payouts
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================================
+-- RPC FUNCTIONS
+-- ============================================================================
+
+-- Calculate delivery fee based on distance and zone
+CREATE OR REPLACE FUNCTION calculate_delivery_fee(
+  p_cafe_id UUID,
+  p_delivery_lat DECIMAL,
+  p_delivery_lon DECIMAL,
+  p_order_amount_credits INTEGER
+) RETURNS JSONB AS $$
+DECLARE
+  v_zone delivery_zones;
+  v_distance_km DECIMAL;
+  v_delivery_fee INTEGER;
+  v_is_free BOOLEAN := false;
+BEGIN
+  -- Find active delivery zone for the cafe
+  SELECT * INTO v_zone
+  FROM delivery_zones
+  WHERE cafe_id = p_cafe_id
+    AND is_active = true
+  ORDER BY created_at DESC
+  LIMIT 1;
+  
+  -- If no zone found, delivery not available
+  IF v_zone IS NULL THEN
+    RETURN jsonb_build_object(
+      'available', false,
+      'reason', 'Delivery not available for this cafe'
+    );
+  END IF;
+  
+  -- Calculate distance (simplified Haversine formula)
+  -- Note: For production, consider using PostGIS extension
+  v_distance_km := (
+    6371 * acos(
+      cos(radians(v_zone.center_latitude)) * 
+      cos(radians(p_delivery_lat)) * 
+      cos(radians(p_delivery_lon) - radians(v_zone.center_longitude)) + 
+      sin(radians(v_zone.center_latitude)) * 
+      sin(radians(p_delivery_lat))
+    )
+  );
+  
+  -- Check if within delivery radius
+  IF v_zone.zone_type = 'radius' AND v_distance_km > v_zone.radius_km THEN
+    RETURN jsonb_build_object(
+      'available', false,
+      'reason', 'Address is outside delivery zone',
+      'distance_km', v_distance_km,
+      'max_radius_km', v_zone.radius_km
+    );
+  END IF;
+  
+  -- Check minimum order amount
+  IF p_order_amount_credits < v_zone.min_order_amount_credits THEN
+    RETURN jsonb_build_object(
+      'available', false,
+      'reason', 'Order amount below minimum for delivery',
+      'min_order_amount_credits', v_zone.min_order_amount_credits,
+      'current_amount_credits', p_order_amount_credits
+    );
+  END IF;
+  
+  -- Calculate delivery fee
+  v_delivery_fee := v_zone.base_delivery_fee_credits + 
+                    (v_distance_km * v_zone.fee_per_km_credits);
+  
+  -- Check if free delivery threshold is met
+  IF v_zone.free_delivery_threshold_credits IS NOT NULL 
+     AND p_order_amount_credits >= v_zone.free_delivery_threshold_credits THEN
+    v_delivery_fee := 0;
+    v_is_free := true;
+  END IF;
+  
+  RETURN jsonb_build_object(
+    'available', true,
+    'delivery_fee_credits', v_delivery_fee,
+    'distance_km', ROUND(v_distance_km::numeric, 2),
+    'is_free', v_is_free,
+    'estimated_time_minutes', v_zone.max_delivery_time_minutes,
+    'zone_id', v_zone.id
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Create delivery order
+CREATE OR REPLACE FUNCTION create_delivery_order(
+  p_order_id UUID,
+  p_delivery_address TEXT,
+  p_delivery_lat DECIMAL,
+  p_delivery_lon DECIMAL,
+  p_delivery_notes TEXT DEFAULT NULL,
+  p_customer_phone TEXT DEFAULT NULL,
+  p_customer_name TEXT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_order orders;
+  v_delivery_id UUID;
+  v_fee_info JSONB;
+BEGIN
+  -- Get order details
+  SELECT * INTO v_order FROM orders WHERE id = p_order_id;
+  
+  IF v_order IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Order not found');
+  END IF;
+  
+  -- Calculate delivery fee
+  v_fee_info := calculate_delivery_fee(
+    v_order.cafe_id,
+    p_delivery_lat,
+    p_delivery_lon,
+    v_order.total_credits
+  );
+  
+  IF NOT (v_fee_info->>'available')::boolean THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', v_fee_info->>'reason',
+      'details', v_fee_info
+    );
+  END IF;
+  
+  -- Create delivery order
+  INSERT INTO delivery_orders (
+    order_id,
+    delivery_address,
+    delivery_latitude,
+    delivery_longitude,
+    delivery_notes,
+    customer_phone,
+    customer_name,
+    delivery_fee_credits,
+    distance_km,
+    estimated_delivery_time,
+    status
+  ) VALUES (
+    p_order_id,
+    p_delivery_address,
+    p_delivery_lat,
+    p_delivery_lon,
+    p_delivery_notes,
+    COALESCE(p_customer_phone, v_order.customer_phone),
+    p_customer_name,
+    (v_fee_info->>'delivery_fee_credits')::integer,
+    (v_fee_info->>'distance_km')::decimal,
+    ((v_fee_info->>'estimated_time_minutes')::integer || ' minutes')::interval,
+    'pending'
+  ) RETURNING id INTO v_delivery_id;
+  
+  RETURN jsonb_build_object(
+    'success', true,
+    'delivery_id', v_delivery_id,
+    'delivery_fee_credits', v_fee_info->>'delivery_fee_credits',
+    'estimated_time_minutes', v_fee_info->>'estimated_time_minutes'
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Find available couriers near a location
+CREATE OR REPLACE FUNCTION find_available_couriers(
+  p_latitude DECIMAL,
+  p_longitude DECIMAL,
+  p_radius_km DECIMAL DEFAULT 5.0,
+  p_limit INTEGER DEFAULT 10
+) RETURNS TABLE (
+  courier_id UUID,
+  full_name TEXT,
+  vehicle_type vehicle_type,
+  rating DECIMAL,
+  distance_km DECIMAL,
+  current_location_lat DECIMAL,
+  current_location_lon DECIMAL
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    c.id,
+    c.full_name,
+    c.vehicle_type,
+    c.rating,
+    -- Calculate distance using Haversine formula
+    (6371 * acos(
+      cos(radians(p_latitude)) * 
+      cos(radians(c.current_location_lat)) * 
+      cos(radians(c.current_location_lon) - radians(p_longitude)) + 
+      sin(radians(p_latitude)) * 
+      sin(radians(c.current_location_lat))
+    ))::DECIMAL(5,2) as distance_km,
+    c.current_location_lat,
+    c.current_location_lon
+  FROM couriers c
+  WHERE c.status = 'available'
+    AND c.is_active = true
+    AND c.is_verified = true
+    AND c.current_location_lat IS NOT NULL
+    AND c.current_location_lon IS NOT NULL
+    AND (6371 * acos(
+      cos(radians(p_latitude)) * 
+      cos(radians(c.current_location_lat)) * 
+      cos(radians(c.current_location_lon) - radians(p_longitude)) + 
+      sin(radians(p_latitude)) * 
+      sin(radians(c.current_location_lat))
+    )) <= p_radius_km
+  ORDER BY distance_km ASC, c.rating DESC
+  LIMIT p_limit;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Assign courier to delivery order
+CREATE OR REPLACE FUNCTION assign_courier_to_order(
+  p_delivery_order_id UUID,
+  p_courier_id UUID DEFAULT NULL,
+  p_auto_assign BOOLEAN DEFAULT false
+) RETURNS JSONB AS $$
+DECLARE
+  v_delivery delivery_orders;
+  v_order orders;
+  v_cafe cafes;
+  v_courier_id UUID;
+  v_available_courier RECORD;
+BEGIN
+  -- Get delivery order
+  SELECT * INTO v_delivery FROM delivery_orders WHERE id = p_delivery_order_id;
+  
+  IF v_delivery IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Delivery order not found');
+  END IF;
+  
+  IF v_delivery.status != 'pending' THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Delivery order is not in pending status');
+  END IF;
+  
+  -- Get order and cafe details
+  SELECT * INTO v_order FROM orders WHERE id = v_delivery.order_id;
+  SELECT * INTO v_cafe FROM cafes WHERE id = v_order.cafe_id;
+  
+  -- Determine courier
+  IF p_courier_id IS NOT NULL THEN
+    -- Manual assignment
+    v_courier_id := p_courier_id;
+  ELSIF p_auto_assign THEN
+    -- Auto assignment: find nearest available courier
+    SELECT courier_id INTO v_courier_id
+    FROM find_available_couriers(
+      v_cafe.latitude,
+      v_cafe.longitude,
+      10.0, -- 10 km radius
+      1
+    )
+    LIMIT 1;
+    
+    IF v_courier_id IS NULL THEN
+      RETURN jsonb_build_object(
+        'success', false,
+        'error', 'No available couriers found nearby'
+      );
+    END IF;
+  ELSE
+    RETURN jsonb_build_object('success', false, 'error', 'Courier ID required or enable auto_assign');
+  END IF;
+  
+  -- Update delivery order
+  UPDATE delivery_orders
+  SET 
+    courier_id = v_courier_id,
+    status = 'assigned',
+    assigned_at = NOW()
+  WHERE id = p_delivery_order_id;
+  
+  -- Update courier status
+  UPDATE couriers
+  SET status = 'busy'
+  WHERE id = v_courier_id;
+  
+  -- TODO: Send push notification to courier
+  
+  RETURN jsonb_build_object(
+    'success', true,
+    'courier_id', v_courier_id,
+    'assigned_at', NOW()
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Update courier location
+CREATE OR REPLACE FUNCTION update_courier_location(
+  p_courier_id UUID,
+  p_latitude DECIMAL,
+  p_longitude DECIMAL,
+  p_accuracy DECIMAL DEFAULT NULL,
+  p_speed DECIMAL DEFAULT NULL,
+  p_heading DECIMAL DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_delivery_order_id UUID;
+BEGIN
+  -- Validate coordinates
+  IF p_latitude < -90 OR p_latitude > 90 OR p_longitude < -180 OR p_longitude > 180 THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Invalid coordinates');
+  END IF;
+  
+  -- Update courier's current location
+  UPDATE couriers
+  SET 
+    current_location_lat = p_latitude,
+    current_location_lon = p_longitude,
+    last_location_update = NOW()
+  WHERE id = p_courier_id;
+  
+  -- Get current delivery order if courier is busy
+  SELECT id INTO v_delivery_order_id
+  FROM delivery_orders
+  WHERE courier_id = p_courier_id
+    AND status IN ('assigned', 'picked_up', 'in_transit')
+  ORDER BY created_at DESC
+  LIMIT 1;
+  
+  -- Insert location history
+  INSERT INTO courier_locations (
+    courier_id,
+    latitude,
+    longitude,
+    accuracy,
+    speed,
+    heading,
+    delivery_order_id
+  ) VALUES (
+    p_courier_id,
+    p_latitude,
+    p_longitude,
+    p_accuracy,
+    p_speed,
+    p_heading,
+    v_delivery_order_id
+  );
+  
+  RETURN jsonb_build_object(
+    'success', true,
+    'recorded_at', NOW()
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Update delivery status
+CREATE OR REPLACE FUNCTION update_delivery_status(
+  p_delivery_order_id UUID,
+  p_new_status delivery_status,
+  p_reason TEXT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_delivery delivery_orders;
+  v_courier_id UUID;
+BEGIN
+  -- Get delivery order
+  SELECT * INTO v_delivery FROM delivery_orders WHERE id = p_delivery_order_id;
+  
+  IF v_delivery IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Delivery order not found');
+  END IF;
+  
+  v_courier_id := v_delivery.courier_id;
+  
+  -- Update delivery status with appropriate timestamp
+  CASE p_new_status
+    WHEN 'picked_up' THEN
+      UPDATE delivery_orders
+      SET status = p_new_status, picked_up_at = NOW()
+      WHERE id = p_delivery_order_id;
+      
+    WHEN 'in_transit' THEN
+      UPDATE delivery_orders
+      SET status = p_new_status, in_transit_at = NOW()
+      WHERE id = p_delivery_order_id;
+      
+    WHEN 'delivered' THEN
+      UPDATE delivery_orders
+      SET status = p_new_status, delivered_at = NOW()
+      WHERE id = p_delivery_order_id;
+      
+      -- Update order status
+      UPDATE orders SET status = 'delivered' WHERE id = v_delivery.order_id;
+      
+      -- Update courier status to available
+      UPDATE couriers
+      SET 
+        status = 'available',
+        completed_deliveries = completed_deliveries + 1,
+        total_deliveries = total_deliveries + 1
+      WHERE id = v_courier_id;
+      
+    WHEN 'failed' THEN
+      UPDATE delivery_orders
+      SET status = p_new_status, failed_at = NOW(), failure_reason = p_reason
+      WHERE id = p_delivery_order_id;
+      
+      -- Update courier status
+      UPDATE couriers
+      SET 
+        status = 'available',
+        failed_deliveries = failed_deliveries + 1,
+        total_deliveries = total_deliveries + 1
+      WHERE id = v_courier_id;
+      
+    WHEN 'cancelled' THEN
+      UPDATE delivery_orders
+      SET status = p_new_status, cancelled_at = NOW(), cancellation_reason = p_reason
+      WHERE id = p_delivery_order_id;
+      
+      -- Update courier status if assigned
+      IF v_courier_id IS NOT NULL THEN
+        UPDATE couriers SET status = 'available' WHERE id = v_courier_id;
+      END IF;
+      
+    ELSE
+      UPDATE delivery_orders
+      SET status = p_new_status
+      WHERE id = p_delivery_order_id;
+  END CASE;
+  
+  -- TODO: Send push notification to customer about status change
+  
+  RETURN jsonb_build_object(
+    'success', true,
+    'new_status', p_new_status,
+    'updated_at', NOW()
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Get delivery tracking info
+CREATE OR REPLACE FUNCTION get_delivery_tracking(
+  p_order_id UUID
+) RETURNS JSONB AS $$
+DECLARE
+  v_delivery delivery_orders;
+  v_courier couriers;
+  v_location courier_locations;
+  v_result JSONB;
+BEGIN
+  -- Get delivery order
+  SELECT * INTO v_delivery
+  FROM delivery_orders
+  WHERE order_id = p_order_id;
+  
+  IF v_delivery IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Delivery order not found');
+  END IF;
+  
+  -- Build base result
+  v_result := jsonb_build_object(
+    'success', true,
+    'delivery_id', v_delivery.id,
+    'status', v_delivery.status,
+    'delivery_address', v_delivery.delivery_address,
+    'delivery_fee_credits', v_delivery.delivery_fee_credits,
+    'distance_km', v_delivery.distance_km,
+    'estimated_delivery_time', v_delivery.estimated_delivery_time,
+    'created_at', v_delivery.created_at
+  );
+  
+  -- Add status timestamps
+  v_result := v_result || jsonb_build_object(
+    'assigned_at', v_delivery.assigned_at,
+    'picked_up_at', v_delivery.picked_up_at,
+    'in_transit_at', v_delivery.in_transit_at,
+    'delivered_at', v_delivery.delivered_at
+  );
+  
+  -- Add courier info if assigned
+  IF v_delivery.courier_id IS NOT NULL THEN
+    SELECT * INTO v_courier FROM couriers WHERE id = v_delivery.courier_id;
+    
+    v_result := v_result || jsonb_build_object(
+      'courier', jsonb_build_object(
+        'id', v_courier.id,
+        'full_name', v_courier.full_name,
+        'phone', v_courier.phone,
+        'vehicle_type', v_courier.vehicle_type,
+        'rating', v_courier.rating,
+        'current_location_lat', v_courier.current_location_lat,
+        'current_location_lon', v_courier.current_location_lon,
+        'last_location_update', v_courier.last_location_update
+      )
+    );
+  END IF;
+  
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Rate courier
+CREATE OR REPLACE FUNCTION rate_courier(
+  p_delivery_order_id UUID,
+  p_rating INTEGER,
+  p_feedback TEXT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+  v_delivery delivery_orders;
+  v_avg_rating DECIMAL;
+BEGIN
+  -- Validate rating
+  IF p_rating < 1 OR p_rating > 5 THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Rating must be between 1 and 5');
+  END IF;
+  
+  -- Get delivery order
+  SELECT * INTO v_delivery FROM delivery_orders WHERE id = p_delivery_order_id;
+  
+  IF v_delivery IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Delivery order not found');
+  END IF;
+  
+  IF v_delivery.status != 'delivered' THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Can only rate completed deliveries');
+  END IF;
+  
+  IF v_delivery.courier_id IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'No courier assigned to this delivery');
+  END IF;
+  
+  -- Update delivery order with rating
+  UPDATE delivery_orders
+  SET 
+    courier_rating = p_rating,
+    courier_feedback = p_feedback
+  WHERE id = p_delivery_order_id;
+  
+  -- Recalculate courier's average rating
+  SELECT AVG(courier_rating)::DECIMAL(3,2) INTO v_avg_rating
+  FROM delivery_orders
+  WHERE courier_id = v_delivery.courier_id
+    AND courier_rating IS NOT NULL;
+  
+  UPDATE couriers
+  SET rating = v_avg_rating
+  WHERE id = v_delivery.courier_id;
+  
+  RETURN jsonb_build_object(
+    'success', true,
+    'rating', p_rating,
+    'courier_new_rating', v_avg_rating
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Get courier active deliveries
+CREATE OR REPLACE FUNCTION get_courier_active_deliveries(
+  p_courier_id UUID
+) RETURNS TABLE (
+  delivery_id UUID,
+  order_id UUID,
+  cafe_name TEXT,
+  cafe_address TEXT,
+  cafe_latitude DECIMAL,
+  cafe_longitude DECIMAL,
+  delivery_address TEXT,
+  delivery_latitude DECIMAL,
+  delivery_longitude DECIMAL,
+  customer_name TEXT,
+  customer_phone TEXT,
+  status delivery_status,
+  delivery_fee_credits INTEGER,
+  distance_km DECIMAL,
+  assigned_at TIMESTAMPTZ
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    d.id,
+    d.order_id,
+    c.name,
+    c.address,
+    c.latitude,
+    c.longitude,
+    d.delivery_address,
+    d.delivery_latitude,
+    d.delivery_longitude,
+    d.customer_name,
+    d.customer_phone,
+    d.status,
+    d.delivery_fee_credits,
+    d.distance_km,
+    d.assigned_at
+  FROM delivery_orders d
+  JOIN orders o ON o.id = d.order_id
+  JOIN cafes c ON c.id = o.cafe_id
+  WHERE d.courier_id = p_courier_id
+    AND d.status IN ('assigned', 'picked_up', 'in_transit')
+  ORDER BY d.assigned_at ASC;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================================================
+-- ROW LEVEL SECURITY
+-- ============================================================================
+
+-- Enable RLS
+ALTER TABLE couriers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE courier_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE delivery_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE delivery_zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE courier_payouts ENABLE ROW LEVEL SECURITY;
+
+-- Couriers policies
+CREATE POLICY "Couriers can view their own profile"
+  ON couriers FOR SELECT
+  TO authenticated
+  USING (user_id = auth.uid());
+
+CREATE POLICY "Couriers can update their own profile"
+  ON couriers FOR UPDATE
+  TO authenticated
+  USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can manage all couriers"
+  ON couriers FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 'admin'
+    )
+  );
+
+-- Courier locations policies
+CREATE POLICY "Couriers can insert their own locations"
+  ON courier_locations FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM couriers
+      WHERE id = courier_id AND user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Users can view courier locations for their orders"
+  ON courier_locations FOR SELECT
+  TO authenticated
+  USING (
+    delivery_order_id IN (
+      SELECT d.id FROM delivery_orders d
+      JOIN orders o ON o.id = d.order_id
+      WHERE o.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Admins can view all courier locations"
+  ON courier_locations FOR SELECT
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 'admin'
+    )
+  );
+
+-- Delivery orders policies
+CREATE POLICY "Users can view their own delivery orders"
+  ON delivery_orders FOR SELECT
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM orders
+      WHERE id = order_id AND user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Couriers can view their assigned deliveries"
+  ON delivery_orders FOR SELECT
+  TO authenticated
+  USING (
+    courier_id IN (
+      SELECT id FROM couriers WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Couriers can update their assigned deliveries"
+  ON delivery_orders FOR UPDATE
+  TO authenticated
+  USING (
+    courier_id IN (
+      SELECT id FROM couriers WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Admins and cafe owners can manage delivery orders"
+  ON delivery_orders FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role IN ('admin', 'cafe_owner')
+    )
+  );
+
+-- Delivery zones policies
+CREATE POLICY "Anyone can view active delivery zones"
+  ON delivery_zones FOR SELECT
+  TO authenticated
+  USING (is_active = true);
+
+CREATE POLICY "Cafe owners can manage their delivery zones"
+  ON delivery_zones FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM cafes
+      WHERE id = cafe_id AND owner_user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Admins can manage all delivery zones"
+  ON delivery_zones FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 'admin'
+    )
+  );
+
+-- Courier payouts policies
+CREATE POLICY "Couriers can view their own payouts"
+  ON courier_payouts FOR SELECT
+  TO authenticated
+  USING (
+    courier_id IN (
+      SELECT id FROM couriers WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Admins can manage all payouts"
+  ON courier_payouts FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE id = auth.uid() AND role = 'admin'
+    )
+  );
+
+-- ============================================================================
+-- GRANTS
+-- ============================================================================
+
+-- Grant usage on custom types
+GRANT USAGE ON TYPE courier_status TO authenticated, anon;
+GRANT USAGE ON TYPE delivery_status TO authenticated, anon;
+GRANT USAGE ON TYPE vehicle_type TO authenticated, anon;
+
+-- ============================================================================
+-- COMMENTS
+-- ============================================================================
+
+COMMENT ON TABLE couriers IS 'Delivery couriers working for the platform';
+COMMENT ON TABLE courier_locations IS 'Real-time location tracking history for couriers';
+COMMENT ON TABLE delivery_orders IS 'Orders with delivery service';
+COMMENT ON TABLE delivery_zones IS 'Delivery zones and pricing for cafes';
+COMMENT ON TABLE courier_payouts IS 'Courier earnings and payout tracking';
+
+COMMENT ON FUNCTION calculate_delivery_fee IS 'Calculate delivery fee based on distance and zone';
+COMMENT ON FUNCTION create_delivery_order IS 'Create a new delivery order';
+COMMENT ON FUNCTION find_available_couriers IS 'Find available couriers near a location';
+COMMENT ON FUNCTION assign_courier_to_order IS 'Assign a courier to a delivery order (manual or auto)';
+COMMENT ON FUNCTION update_courier_location IS 'Update courier real-time location';
+COMMENT ON FUNCTION update_delivery_status IS 'Update delivery status with timestamps';
+COMMENT ON FUNCTION get_delivery_tracking IS 'Get real-time delivery tracking information';
+COMMENT ON FUNCTION rate_courier IS 'Rate courier after delivery completion';
+COMMENT ON FUNCTION get_courier_active_deliveries IS 'Get active deliveries for a courier';

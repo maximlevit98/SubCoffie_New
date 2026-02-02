@@ -1,0 +1,368 @@
+import SwiftUI
+
+// MARK: - Favorites View
+struct FavoritesView: View {
+    @StateObject private var socialService = SocialService()
+    @State private var selectedTab = 0
+    @State private var isLoading = true
+    @State private var showError = false
+    @State private var errorMessage = ""
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Segmented Control
+                Picker("", selection: $selectedTab) {
+                    Text("Кафе").tag(0)
+                    Text("Блюда").tag(1)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+                
+                // Content
+                if isLoading {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                } else if let favorites = socialService.favorites {
+                    if selectedTab == 0 {
+                        FavoriteCafesListView(cafes: favorites.cafes)
+                    } else {
+                        FavoriteMenuItemsListView(menuItems: favorites.menuItems)
+                    }
+                } else {
+                    EmptyFavoritesView()
+                }
+            }
+            .navigationTitle("Избранное")
+            .navigationBarTitleDisplayMode(.inline)
+            .task {
+                await loadFavorites()
+            }
+            .refreshable {
+                await loadFavorites()
+            }
+            .alert("Ошибка", isPresented: $showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage)
+            }
+        }
+    }
+    
+    private func loadFavorites() async {
+        isLoading = true
+        
+        do {
+            _ = try await socialService.getUserFavorites()
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Favorite Cafes List
+struct FavoriteCafesListView: View {
+    let cafes: [FavoriteCafe]
+    @StateObject private var socialService = SocialService()
+    
+    var body: some View {
+        ScrollView {
+            if cafes.isEmpty {
+                EmptyStateView(
+                    icon: "heart.slash",
+                    title: "Нет избранных кафе",
+                    message: "Добавьте кафе в избранное, чтобы быстро находить их"
+                )
+                .padding()
+            } else {
+                LazyVStack(spacing: 16) {
+                    ForEach(cafes) { cafe in
+                        FavoriteCafeCardView(cafe: cafe, socialService: socialService)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.vertical)
+            }
+        }
+    }
+}
+
+// MARK: - Favorite Cafe Card
+struct FavoriteCafeCardView: View {
+    let cafe: FavoriteCafe
+    @ObservedObject var socialService: SocialService
+    
+    @State private var isRemoving = false
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Logo
+            AsyncImage(url: cafe.logoUrl.flatMap(URL.init)) { image in
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.2))
+                    .overlay(
+                        Image(systemName: "cup.and.saucer.fill")
+                            .foregroundColor(.gray)
+                    )
+            }
+            .frame(width: 60, height: 60)
+            .cornerRadius(12)
+            
+            // Info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(cafe.name)
+                    .font(.headline)
+                
+                Text(cafe.address)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                
+                Text("Добавлено: \(cafe.favoritedAt, style: .date)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            // Remove Button
+            Button {
+                Task { await removeFavorite() }
+            } label: {
+                Image(systemName: isRemoving ? "heart" : "heart.fill")
+                    .foregroundColor(.red)
+                    .font(.title2)
+            }
+            .disabled(isRemoving)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(16)
+    }
+    
+    private func removeFavorite() async {
+        isRemoving = true
+        
+        do {
+            _ = try await socialService.toggleFavorite(cafeId: cafe.cafeId)
+            // Refresh favorites after removal
+            try await socialService.getUserFavorites()
+        } catch {
+            Logger.error("Failed to remove favorite: \(error)")
+        }
+        
+        isRemoving = false
+    }
+}
+
+// MARK: - Favorite Menu Items List
+struct FavoriteMenuItemsListView: View {
+    let menuItems: [FavoriteMenuItem]
+    @StateObject private var socialService = SocialService()
+    
+    var body: some View {
+        ScrollView {
+            if menuItems.isEmpty {
+                EmptyStateView(
+                    icon: "heart.slash",
+                    title: "Нет избранных блюд",
+                    message: "Добавьте блюда в избранное, чтобы быстро заказать их"
+                )
+                .padding()
+            } else {
+                LazyVStack(spacing: 16) {
+                    ForEach(menuItems) { item in
+                        FavoriteMenuItemCardView(item: item, socialService: socialService)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.vertical)
+            }
+        }
+    }
+}
+
+// MARK: - Favorite Menu Item Card
+struct FavoriteMenuItemCardView: View {
+    let item: FavoriteMenuItem
+    @ObservedObject var socialService: SocialService
+    
+    @State private var isRemoving = false
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Image
+            AsyncImage(url: item.imageUrl.flatMap(URL.init)) { image in
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.2))
+                    .overlay(
+                        Image(systemName: "cup.and.saucer.fill")
+                            .foregroundColor(.gray)
+                    )
+            }
+            .frame(width: 80, height: 80)
+            .cornerRadius(12)
+            
+            // Info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.name)
+                    .font(.headline)
+                
+                if let description = item.description {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                
+                HStack {
+                    Text("\(item.priceCredits) ₽")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.blue)
+                    
+                    Spacer()
+                    
+                    Text("Добавлено: \(item.favoritedAt, style: .date)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            // Remove Button
+            Button {
+                Task { await removeFavorite() }
+            } label: {
+                Image(systemName: isRemoving ? "heart" : "heart.fill")
+                    .foregroundColor(.red)
+                    .font(.title2)
+            }
+            .disabled(isRemoving)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(16)
+    }
+    
+    private func removeFavorite() async {
+        isRemoving = true
+        
+        do {
+            _ = try await socialService.toggleFavorite(menuItemId: item.menuItemId)
+            // Refresh favorites after removal
+            try await socialService.getUserFavorites()
+        } catch {
+            Logger.error("Failed to remove favorite: \(error)")
+        }
+        
+        isRemoving = false
+    }
+}
+
+// MARK: - Empty Favorites View
+struct EmptyFavoritesView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "heart.slash")
+                .font(.system(size: 60))
+                .foregroundColor(.gray)
+            
+            Text("Нет избранного")
+                .font(.title2)
+                .fontWeight(.semibold)
+            
+            Text("Добавляйте кафе и блюда в избранное, чтобы быстро находить их")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Empty State View
+struct EmptyStateView: View {
+    let icon: String
+    let title: String
+    let message: String
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 60))
+                .foregroundColor(.gray)
+            
+            Text(title)
+                .font(.title2)
+                .fontWeight(.semibold)
+            
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Favorite Toggle Button Component
+struct FavoriteToggleButton: View {
+    let cafeId: UUID?
+    let menuItemId: UUID?
+    
+    @StateObject private var socialService = SocialService()
+    @State private var isFavorited = false
+    @State private var isLoading = false
+    
+    var body: some View {
+        Button {
+            Task { await toggleFavorite() }
+        } label: {
+            Image(systemName: isFavorited ? "heart.fill" : "heart")
+                .foregroundColor(isFavorited ? .red : .gray)
+                .font(.title2)
+        }
+        .disabled(isLoading)
+        .task {
+            await checkIfFavorited()
+        }
+    }
+    
+    private func checkIfFavorited() async {
+        do {
+            isFavorited = try await socialService.checkIfFavorited(cafeId: cafeId, menuItemId: menuItemId)
+        } catch {
+            Logger.error("Failed to check favorite status: \(error)")
+        }
+    }
+    
+    private func toggleFavorite() async {
+        isLoading = true
+        
+        do {
+            isFavorited = try await socialService.toggleFavorite(cafeId: cafeId, menuItemId: menuItemId)
+        } catch {
+            Logger.error("Failed to toggle favorite: \(error)")
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Preview
+#Preview {
+    FavoritesView()
+}

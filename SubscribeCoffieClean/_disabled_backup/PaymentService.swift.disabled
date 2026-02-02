@@ -1,0 +1,213 @@
+//
+//  PaymentService.swift
+//  SubscribeCoffieClean
+//
+//  Service for real payment processing with YooKassa/Stripe
+//
+
+import Foundation
+import SafariServices
+import UIKit
+
+// Payment models are defined in WalletModels.swift to avoid duplication
+
+@MainActor
+class PaymentService: ObservableObject {
+    private let apiClient: SupabaseAPIClient
+    private let edgeFunctionURL: String
+    
+    @Published var isProcessing = false
+    @Published var currentTransaction: PaymentIntentResponse?
+    @Published var transactionStatus: TransactionStatusResponse?
+    
+    init(apiClient: SupabaseAPIClient = .shared) {
+        self.apiClient = apiClient
+        
+        // Get Edge Function URL from environment
+        let supabaseURL = SupabaseConfig.projectURL
+        self.edgeFunctionURL = "\(supabaseURL)/functions/v1"
+    }
+    
+    // MARK: - Create Payment Intent
+    
+    /// Creates a payment intent for wallet top-up
+    func createPaymentIntent(
+        walletId: UUID,
+        amount: Int,
+        paymentMethodId: UUID? = nil,
+        description: String = "Wallet Top-Up"
+    ) async throws -> PaymentIntentResponse {
+        isProcessing = true
+        defer { isProcessing = false }
+        
+        // Get auth token
+        guard let accessToken = await getAccessToken() else {
+            throw NetworkError.unauthorized
+        }
+        
+        // Prepare request
+        let url = URL(string: "\(edgeFunctionURL)/create-payment")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        
+        let body: [String: Any] = [
+            "wallet_id": walletId.uuidString,
+            "amount": amount,
+            "payment_method_id": paymentMethodId?.uuidString as Any,
+            "description": description,
+            "return_url": "\(SupabaseConfig.projectURL)/wallet-topup-success"
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        // Execute request
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.invalidResponse
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            if let errorData = try? JSONDecoder().decode([String: String].self, from: data),
+               let errorMessage = errorData["error"] {
+                throw NetworkError.serverError(errorMessage)
+            }
+            throw NetworkError.serverError("HTTP \(httpResponse.statusCode)")
+        }
+        
+        let paymentIntent = try JSONDecoder().decode(PaymentIntentResponse.self, from: data)
+        currentTransaction = paymentIntent
+        
+        return paymentIntent
+    }
+    
+    // MARK: - Process Payment
+    
+    /// Processes payment based on provider
+    func processPayment(
+        paymentIntent: PaymentIntentResponse,
+        from viewController: UIViewController
+    ) async throws {
+        switch paymentIntent.provider {
+        case .yookassa:
+            try await processYooKassaPayment(paymentIntent, from: viewController)
+        case .stripe:
+            try await processStripePayment(paymentIntent, from: viewController)
+        case .mock:
+            // For mock, payment is already completed
+            try await pollTransactionStatus(transactionId: paymentIntent.transactionId)
+        }
+    }
+    
+    // MARK: - YooKassa Payment
+    
+    private func processYooKassaPayment(
+        _ paymentIntent: PaymentIntentResponse,
+        from viewController: UIViewController
+    ) async throws {
+        guard let confirmationUrl = paymentIntent.confirmationUrl,
+              let url = URL(string: confirmationUrl) else {
+            throw NetworkError.invalidResponse
+        }
+        
+        // Open payment page in Safari View Controller
+        let safariVC = SFSafariViewController(url: url)
+        await MainActor.run {
+            viewController.present(safariVC, animated: true)
+        }
+        
+        // Poll for payment status
+        try await pollTransactionStatus(transactionId: paymentIntent.transactionId)
+        
+        // Dismiss Safari VC when payment is complete
+        await MainActor.run {
+            safariVC.dismiss(animated: true)
+        }
+    }
+    
+    // MARK: - Stripe Payment
+    
+    private func processStripePayment(
+        _ paymentIntent: PaymentIntentResponse,
+        from viewController: UIViewController
+    ) async throws {
+        // TODO: Integrate Stripe iOS SDK
+        // For now, show alert that Stripe integration is pending
+        throw NetworkError.serverError("Stripe integration pending. Use YooKassa or mock payments.")
+    }
+    
+    // MARK: - Transaction Status Polling
+    
+    /// Polls transaction status until completed or failed
+    func pollTransactionStatus(transactionId: String, maxAttempts: Int = 30) async throws {
+        var attempts = 0
+        
+        while attempts < maxAttempts {
+            let status = try await getTransactionStatus(transactionId: transactionId)
+            self.transactionStatus = status
+            
+            switch status.status {
+            case "completed":
+                return
+            case "failed":
+                let errorMessage = status.providerErrorMessage ?? "Payment failed"
+                throw NetworkError.serverError(errorMessage)
+            case "pending":
+                // Continue polling
+                try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                attempts += 1
+            default:
+                throw NetworkError.serverError("Unknown status: \(status.status)")
+            }
+        }
+        
+        throw NetworkError.serverError("Payment timeout - status check exceeded max attempts")
+    }
+    
+    // MARK: - Get Transaction Status
+    
+    func getTransactionStatus(transactionId: String) async throws -> TransactionStatusResponse {
+        let response: TransactionStatusResponse = try await apiClient.rpc(
+            "get_transaction_status",
+            params: ["p_transaction_id": transactionId]
+        )
+        
+        return response
+    }
+    
+    // MARK: - Helpers
+    
+    private func getAccessToken() async -> String? {
+        // Get token from Supabase client
+        let client = SupabaseClientProvider.shared.client
+        
+        do {
+            let session = try await client.auth.session
+            return session.accessToken
+        } catch {
+            print("Error getting access token: \(error)")
+            return nil
+        }
+    }
+}
+
+// MARK: - UIViewController Extension
+
+extension UIViewController {
+    /// Find the topmost view controller
+    static func topMostController() -> UIViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            return nil
+        }
+        
+        var topController = rootViewController
+        while let presented = topController.presentedViewController {
+            topController = presented
+        }
+        
+        return topController
+    }
+}

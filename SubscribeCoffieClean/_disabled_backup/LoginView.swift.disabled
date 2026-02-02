@@ -1,0 +1,415 @@
+import SwiftUI
+import AuthenticationServices
+
+enum LoginMode {
+    case email
+    case phone
+}
+
+struct LoginView: View {
+    let onVerified: (_ phone: String) -> Void
+
+    @StateObject private var authService = AuthService.shared
+    @State private var loginMode: LoginMode = .email
+    @State private var isSignUp: Bool = false
+    
+    // Email/Password fields
+    @State private var email: String = ""
+    @State private var password: String = ""
+    @State private var confirmPassword: String = ""
+    @State private var fullName: String = ""
+    
+    // Phone fields (legacy)
+    @State private var phone: String = ""
+    @State private var code: String = ""
+    @State private var isCodeSent = false
+    
+    // UI State
+    @State private var errorText: String? = nil
+    @State private var showingPasswordReset: Bool = false
+
+    private var digitsPhone: String {
+        phone.filter { $0.isNumber }
+    }
+
+    private var canProceed: Bool {
+        if loginMode == .email {
+            if isSignUp {
+                return !email.isEmpty && password.count >= 6 && password == confirmPassword && !fullName.isEmpty
+            } else {
+                return !email.isEmpty && password.count >= 6
+            }
+        } else {
+            return digitsPhone.count >= 10
+        }
+    }
+
+    private var canVerify: Bool {
+        isCodeSent && code.count >= 4
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Header
+                headerView
+                
+                // Mode Selector
+                modeSelector
+                
+                // Auth Forms
+                if loginMode == .email {
+                    emailAuthForm
+                } else {
+                    phoneAuthForm
+                }
+                
+                // OAuth Buttons
+                if loginMode == .email {
+                    oauthButtons
+                }
+                
+                // Error Message
+                if let errorText {
+                    Text(errorText)
+                        .foregroundColor(.red)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.top, 40)
+        }
+        .overlay {
+            if authService.isLoading {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black.opacity(0.2))
+            }
+        }
+        .alert("Сброс пароля", isPresented: $showingPasswordReset) {
+            TextField("Email", text: $email)
+            Button("Отправить") {
+                Task {
+                    await resetPassword()
+                }
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Мы отправим вам ссылку для сброса пароля")
+        }
+    }
+    
+    // MARK: - Header View
+    
+    private var headerView: some View {
+        VStack(spacing: 8) {
+            Text("SubscribeCoffie")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+            
+            Text(loginMode == .email ? 
+                 (isSignUp ? "Создание аккаунта" : "Вход в аккаунт") : 
+                 "Вход по SMS")
+                .font(.title3)
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    // MARK: - Mode Selector
+    
+    private var modeSelector: some View {
+        Picker("Способ входа", selection: $loginMode) {
+            Text("Email").tag(LoginMode.email)
+            Text("Телефон").tag(LoginMode.phone)
+        }
+        .pickerStyle(.segmented)
+        .padding(.vertical, 8)
+        .onChange(of: loginMode) { _ in
+            errorText = nil
+        }
+    }
+    
+    // MARK: - Email Auth Form
+    
+    private var emailAuthForm: some View {
+        VStack(spacing: 16) {
+            if isSignUp {
+                TextField("Имя", text: $fullName)
+                    .textContentType(.name)
+                    .autocapitalization(.words)
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(14)
+            }
+            
+            TextField("Email", text: $email)
+                .textContentType(isSignUp ? .emailAddress : .username)
+                .keyboardType(.emailAddress)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(14)
+            
+            SecureField("Пароль", text: $password)
+                .textContentType(isSignUp ? .newPassword : .password)
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(14)
+            
+            if isSignUp {
+                SecureField("Подтвердите пароль", text: $confirmPassword)
+                    .textContentType(.newPassword)
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(14)
+                
+                if !password.isEmpty && !confirmPassword.isEmpty && password != confirmPassword {
+                    Text("Пароли не совпадают")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+            
+            Button {
+                Task {
+                    await handleEmailAuth()
+                }
+            } label: {
+                Text(isSignUp ? "Зарегистрироваться" : "Войти")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(canProceed ? Color.accentColor : Color.gray)
+                    .foregroundColor(.white)
+                    .cornerRadius(14)
+            }
+            .disabled(!canProceed || authService.isLoading)
+            
+            HStack {
+                if !isSignUp {
+                    Button("Забыли пароль?") {
+                        showingPasswordReset = true
+                    }
+                    .font(.subheadline)
+                }
+                
+                Spacer()
+                
+                Button(isSignUp ? "Уже есть аккаунт?" : "Создать аккаунт") {
+                    isSignUp.toggle()
+                    errorText = nil
+                }
+                .font(.subheadline)
+            }
+        }
+    }
+    
+    // MARK: - Phone Auth Form (Legacy)
+    
+    private var phoneAuthForm: some View {
+        VStack(spacing: 16) {
+            Text("Введите номер телефона. Код — заглушка (для теста: 1234).")
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .font(.subheadline)
+
+            TextField("+7 ___ ___-__-__", text: $phone)
+                .keyboardType(.phonePad)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(14)
+
+            if isCodeSent {
+                TextField("Код из SMS (1234)", text: $code)
+                    .keyboardType(.numberPad)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(14)
+
+                Button("Подтвердить") {
+                    verify()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canVerify)
+
+                Button("Отправить код ещё раз") {
+                    sendCode()
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Button("Получить код") {
+                    sendCode()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canProceed)
+            }
+        }
+    }
+    
+    // MARK: - OAuth Buttons
+    
+    private var oauthButtons: some View {
+        VStack(spacing: 12) {
+            Text("или войти через")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .padding(.top, 8)
+            
+            // Sign in with Apple
+            SignInWithAppleButton(
+                onRequest: { request in
+                    request.requestedScopes = [.fullName, .email]
+                },
+                onCompletion: { result in
+                    Task {
+                        await handleAppleSignIn(result)
+                    }
+                }
+            )
+            .signInWithAppleButtonStyle(.black)
+            .frame(height: 50)
+            .cornerRadius(14)
+            
+            // Sign in with Google
+            Button {
+                Task {
+                    await handleGoogleSignIn()
+                }
+            } label: {
+                HStack {
+                    Image(systemName: "g.circle.fill")
+                        .font(.title2)
+                    Text("Войти через Google")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.white)
+                .foregroundColor(.black)
+                .cornerRadius(14)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+            }
+            .disabled(authService.isLoading)
+        }
+    }
+    
+    // MARK: - Actions
+    
+    private func handleEmailAuth() async {
+        errorText = nil
+        
+        do {
+            if isSignUp {
+                try await authService.signUpWithEmail(
+                    email: email,
+                    password: password,
+                    fullName: fullName
+                )
+                errorText = "Проверьте email для подтверждения регистрации"
+            } else {
+                try await authService.signInWithEmail(
+                    email: email,
+                    password: password
+                )
+                // Success will be handled by auth state listener
+            }
+        } catch let error as AuthError {
+            errorText = error.errorDescription
+        } catch {
+            errorText = "Произошла ошибка: \(error.localizedDescription)"
+        }
+    }
+    
+    private func handleAppleSignIn(_ result: Result<ASAuthorization, Error>) async {
+        errorText = nil
+        
+        switch result {
+        case .success(let authorization):
+            if let credential = authorization.credential as? ASAuthorizationAppleIDCredential {
+                do {
+                    try await authService.signInWithApple(credential: credential)
+                } catch let error as AuthError {
+                    errorText = error.errorDescription
+                } catch {
+                    errorText = "Ошибка входа через Apple"
+                }
+            }
+        case .failure(let error):
+            if (error as NSError).code != 1001 { // User cancelled
+                errorText = "Ошибка входа через Apple"
+            }
+        }
+    }
+    
+    private func handleGoogleSignIn() async {
+        errorText = nil
+        
+        do {
+            try await authService.signInWithGoogle()
+        } catch let error as AuthError {
+            errorText = error.errorDescription
+        } catch {
+            errorText = "Ошибка входа через Google"
+        }
+    }
+    
+    private func resetPassword() async {
+        errorText = nil
+        
+        guard !email.isEmpty else {
+            errorText = "Введите email"
+            return
+        }
+        
+        do {
+            try await authService.resetPassword(email: email)
+            errorText = "Ссылка для сброса пароля отправлена на \(email)"
+        } catch let error as AuthError {
+            errorText = error.errorDescription
+        } catch {
+            errorText = "Ошибка отправки письма"
+        }
+    }
+
+    private func sendCode() {
+        errorText = nil
+        guard canProceed else {
+            errorText = "Введите корректный номер (минимум 10 цифр)."
+            return
+        }
+        isCodeSent = true
+    }
+
+    private func verify() {
+        errorText = nil
+
+        guard canProceed else {
+            errorText = "Сначала введите номер телефона."
+            return
+        }
+
+        guard code == "1234" else {
+            errorText = "Неверный код. Для теста используйте 1234."
+            return
+        }
+
+        onVerified(digitsPhone)
+    }
+}
+
+#Preview {
+    LoginView(onVerified: { _ in })
+}

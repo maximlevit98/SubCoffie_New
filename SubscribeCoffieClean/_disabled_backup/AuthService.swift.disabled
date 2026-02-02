@@ -1,0 +1,540 @@
+import Foundation
+import Supabase
+import AuthenticationServices
+import SwiftUI
+import Combine
+
+/// Authentication service that handles all auth methods: Email, OAuth (Google, Apple), and Phone
+@MainActor
+class AuthService: ObservableObject {
+    @Published var currentUser: User?
+    @Published var userProfile: UserProfile?
+    @Published var isAuthenticated = false
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    
+    private let supabase = SupabaseClientProvider.client
+    
+    init() {
+        Task {
+            await checkSession()
+        }
+    }
+    
+    // MARK: - Session Management
+    
+    func checkSession() async {
+        isLoading = true
+        defer { isLoading = false }
+        
+        do {
+            let session = try await supabase.auth.session
+            currentUser = session.user
+            isAuthenticated = true
+            
+            // Fetch user profile
+            await fetchUserProfile()
+        } catch {
+            print("No active session: \(error.localizedDescription)")
+            isAuthenticated = false
+            currentUser = nil
+            userProfile = nil
+        }
+    }
+    
+    func fetchUserProfile() async {
+        guard currentUser != nil else { return }
+        
+        do {
+            let response = try await supabase.rpc("get_user_profile").execute()
+            let profileData = try JSONDecoder().decode(UserProfile.self, from: response.data)
+            userProfile = profileData
+        } catch {
+            print("Failed to fetch user profile: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Email Authentication
+    
+    func signUpWithEmail(email: String, password: String, fullName: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            let response = try await supabase.auth.signUp(
+                email: email,
+                password: password,
+                data: ["full_name": .string(fullName)]
+            )
+            
+            currentUser = response.user
+            isAuthenticated = response.session != nil
+            
+            if isAuthenticated {
+                await fetchUserProfile()
+                await recordLogin(method: "email", success: true)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            await recordLogin(method: "email", success: false, failureReason: error.localizedDescription)
+            throw error
+        }
+    }
+    
+    func signInWithEmail(email: String, password: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            let response = try await supabase.auth.signIn(
+                email: email,
+                password: password
+            )
+            
+            currentUser = response.user
+            isAuthenticated = true
+            
+            await fetchUserProfile()
+            await recordLogin(method: "email", success: true)
+        } catch {
+            errorMessage = error.localizedDescription
+            await recordLogin(method: "email", success: false, failureReason: error.localizedDescription)
+            throw error
+        }
+    }
+    
+    func sendPasswordResetEmail(email: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            try await supabase.auth.resetPasswordForEmail(email)
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    func sendMagicLink(email: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            try await supabase.auth.signInWithOTP(email: email)
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    func verifyOTP(email: String, token: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            let response = try await supabase.auth.verifyOTP(
+                email: email,
+                token: token,
+                type: .email
+            )
+            
+            currentUser = response.user
+            isAuthenticated = response.session != nil
+            
+            if isAuthenticated {
+                await fetchUserProfile()
+                await recordLogin(method: "email", success: true)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Phone Authentication
+    
+    func signInWithPhone(phone: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            try await supabase.auth.signInWithOTP(phone: phone)
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    func verifyPhoneOTP(phone: String, token: String) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            let response = try await supabase.auth.verifyOTP(
+                phone: phone,
+                token: token,
+                type: .sms
+            )
+            
+            currentUser = response.user
+            isAuthenticated = response.session != nil
+            
+            if isAuthenticated {
+                await fetchUserProfile()
+                await recordLogin(method: "phone", success: true)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            await recordLogin(method: "phone", success: false, failureReason: error.localizedDescription)
+            throw error
+        }
+    }
+    
+    // MARK: - OAuth Authentication
+    
+    func signInWithGoogle() async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            // Supabase will handle the OAuth flow
+            let url = try await supabase.auth.getOAuthSignInURL(
+                provider: .google,
+                redirectTo: URL(string: "subscribecoffie://auth/callback")
+            )
+            
+            // Open the OAuth URL in Safari/Browser
+            await openURL(url)
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    func signInWithApple(authorization: ASAuthorization) async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            throw AuthError.invalidCredential
+        }
+        
+        guard let identityToken = appleIDCredential.identityToken,
+              let tokenString = String(data: identityToken, encoding: .utf8) else {
+            throw AuthError.invalidToken
+        }
+        
+        do {
+            let response = try await supabase.auth.signInWithIdToken(
+                credentials: .init(
+                    provider: .apple,
+                    idToken: tokenString
+                )
+            )
+            
+            currentUser = response.user
+            isAuthenticated = response.session != nil
+            
+            if isAuthenticated {
+                // Update profile with Apple ID data if available
+                if let fullName = appleIDCredential.fullName {
+                    let name = [fullName.givenName, fullName.familyName]
+                        .compactMap { $0 }
+                        .joined(separator: " ")
+                    
+                    if !name.isEmpty {
+                        _ = try? await updateProfile(fullName: name)
+                    }
+                }
+                
+                await fetchUserProfile()
+                await recordLogin(method: "apple", success: true)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            await recordLogin(method: "apple", success: false, failureReason: error.localizedDescription)
+            throw error
+        }
+    }
+    
+    func handleOAuthCallback(url: URL) async throws {
+        // Handle OAuth callback from deep link
+        do {
+            try await supabase.auth.session(from: url)
+            await checkSession()
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Profile Management
+    
+    func updateProfile(
+        fullName: String? = nil,
+        birthDate: Date? = nil,
+        city: String? = nil,
+        bio: String? = nil,
+        avatarURL: String? = nil
+    ) async throws -> UserProfile {
+        guard isAuthenticated else {
+            throw AuthError.notAuthenticated
+        }
+        
+        do {
+            let params: [String: Any?] = [
+                "p_full_name": fullName,
+                "p_birth_date": birthDate?.ISO8601Format(),
+                "p_city": city,
+                "p_bio": bio,
+                "p_avatar_url": avatarURL
+            ]
+            
+            let filteredParams = params.compactMapValues { $0 }
+            
+            let response = try await supabase.rpc("update_user_profile", params: filteredParams).execute()
+            let updatedProfile = try JSONDecoder().decode(UserProfile.self, from: response.data)
+            
+            userProfile = updatedProfile
+            return updatedProfile
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    func updatePreferences(
+        notificationsEnabled: Bool? = nil,
+        emailMarketingEnabled: Bool? = nil,
+        pushMarketingEnabled: Bool? = nil,
+        language: String? = nil,
+        theme: String? = nil
+    ) async throws {
+        guard isAuthenticated else {
+            throw AuthError.notAuthenticated
+        }
+        
+        let params: [String: Any?] = [
+            "p_notification_enabled": notificationsEnabled,
+            "p_email_marketing_enabled": emailMarketingEnabled,
+            "p_push_marketing_enabled": pushMarketingEnabled,
+            "p_preferred_language": language,
+            "p_theme": theme
+        ]
+        
+        let filteredParams = params.compactMapValues { $0 }
+        
+        do {
+            _ = try await supabase.rpc("update_user_profile", params: filteredParams).execute()
+            await fetchUserProfile()
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Sign Out
+    
+    func signOut() async throws {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            try await supabase.auth.signOut()
+            currentUser = nil
+            userProfile = nil
+            isAuthenticated = false
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Account Deletion
+    
+    func requestAccountDeletion(reason: String? = nil) async throws {
+        guard isAuthenticated else {
+            throw AuthError.notAuthenticated
+        }
+        
+        do {
+            let params: [String: Any] = ["p_reason": reason ?? ""]
+            _ = try await supabase.rpc("request_account_deletion", params: params).execute()
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Login History
+    
+    func getLoginHistory(limit: Int = 10, offset: Int = 0) async throws -> [LoginHistoryItem] {
+        guard isAuthenticated else {
+            throw AuthError.notAuthenticated
+        }
+        
+        do {
+            let params: [String: Any] = [
+                "p_limit": limit,
+                "p_offset": offset
+            ]
+            
+            let response = try await supabase.rpc("get_login_history", params: params).execute()
+            let history = try JSONDecoder().decode([LoginHistoryItem].self, from: response.data)
+            return history
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
+        }
+    }
+    
+    // MARK: - Private Helpers
+    
+    private func recordLogin(method: String, success: Bool, failureReason: String? = nil) async {
+        guard let userId = currentUser?.id else { return }
+        
+        let params: [String: Any] = [
+            "p_user_id": userId.uuidString,
+            "p_login_method": method,
+            "p_success": success,
+            "p_failure_reason": failureReason ?? ""
+        ]
+        
+        do {
+            _ = try await supabase.rpc("record_login_attempt", params: params).execute()
+        } catch {
+            print("Failed to record login: \(error.localizedDescription)")
+        }
+    }
+    
+    private func openURL(_ url: URL) async {
+        await MainActor.run {
+            #if os(iOS)
+            UIApplication.shared.open(url)
+            #endif
+        }
+    }
+}
+
+// MARK: - Models
+
+struct UserProfile: Codable, Identifiable {
+    let id: UUID
+    var email: String?
+    var phone: String?
+    var fullName: String?
+    var avatarUrl: String?
+    var birthDate: String?
+    var city: String?
+    var bio: String?
+    var authProvider: String
+    var notificationEnabled: Bool
+    var emailMarketingEnabled: Bool
+    var pushMarketingEnabled: Bool
+    var preferredLanguage: String
+    var theme: String
+    var isVerified: Bool
+    var isActive: Bool
+    var lastLoginAt: String?
+    var createdAt: String
+    var updatedAt: String
+    var oauthConnections: [OAuthConnection]?
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case email
+        case phone
+        case fullName = "full_name"
+        case avatarUrl = "avatar_url"
+        case birthDate = "birth_date"
+        case city
+        case bio
+        case authProvider = "auth_provider"
+        case notificationEnabled = "notification_enabled"
+        case emailMarketingEnabled = "email_marketing_enabled"
+        case pushMarketingEnabled = "push_marketing_enabled"
+        case preferredLanguage = "preferred_language"
+        case theme
+        case isVerified = "is_verified"
+        case isActive = "is_active"
+        case lastLoginAt = "last_login_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case oauthConnections = "oauth_connections"
+    }
+}
+
+struct OAuthConnection: Codable, Identifiable {
+    let id = UUID()
+    let provider: String
+    let providerEmail: String?
+    let isPrimary: Bool
+    let createdAt: String
+    
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case providerEmail = "provider_email"
+        case isPrimary = "is_primary"
+        case createdAt = "created_at"
+    }
+}
+
+struct LoginHistoryItem: Codable, Identifiable {
+    let id: UUID
+    let loginMethod: String
+    let ipAddress: String?
+    let userAgent: String?
+    let deviceInfo: [String: String]?
+    let success: Bool
+    let failureReason: String?
+    let createdAt: String
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case loginMethod = "login_method"
+        case ipAddress = "ip_address"
+        case userAgent = "user_agent"
+        case deviceInfo = "device_info"
+        case success
+        case failureReason = "failure_reason"
+        case createdAt = "created_at"
+    }
+}
+
+// MARK: - Errors
+
+enum AuthError: LocalizedError {
+    case notAuthenticated
+    case invalidCredential
+    case invalidToken
+    case emailAlreadyExists
+    case weakPassword
+    case networkError
+    
+    var errorDescription: String? {
+        switch self {
+        case .notAuthenticated:
+            return "Пожалуйста, войдите в систему"
+        case .invalidCredential:
+            return "Неверные учетные данные"
+        case .invalidToken:
+            return "Недействительный токен"
+        case .emailAlreadyExists:
+            return "Email уже зарегистрирован"
+        case .weakPassword:
+            return "Пароль слишком слабый"
+        case .networkError:
+            return "Ошибка сети. Проверьте подключение"
+        }
+    }
+}

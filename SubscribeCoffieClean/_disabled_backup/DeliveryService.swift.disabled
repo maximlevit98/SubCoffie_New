@@ -1,0 +1,319 @@
+import Foundation
+import CoreLocation
+import Supabase
+
+class DeliveryService {
+    static let shared = DeliveryService()
+    private let supabase = SupabaseManager.shared.client
+    
+    private init() {}
+    
+    // MARK: - Calculate Delivery Fee
+    func calculateDeliveryFee(
+        cafeId: UUID,
+        latitude: Double,
+        longitude: Double
+    ) async throws -> DeliveryFeeResponse {
+        let response = try await supabase
+            .rpc("calculate_delivery_fee", params: [
+                "p_cafe_id": cafeId.uuidString,
+                "p_delivery_lat": latitude,
+                "p_delivery_lon": longitude
+            ])
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let feeResponse = try decoder.decode(DeliveryFeeResponse.self, from: response.data)
+        
+        return feeResponse
+    }
+    
+    // MARK: - Create Delivery Order
+    func createDeliveryOrder(
+        orderId: UUID,
+        deliveryAddress: String,
+        latitude: Double,
+        longitude: Double,
+        instructions: String? = nil
+    ) async throws -> DeliveryOrder {
+        var params: [String: Any] = [
+            "p_order_id": orderId.uuidString,
+            "p_delivery_address": deliveryAddress,
+            "p_delivery_lat": latitude,
+            "p_delivery_lon": longitude
+        ]
+        
+        if let instructions = instructions {
+            params["p_delivery_instructions"] = instructions
+        }
+        
+        let response = try await supabase
+            .rpc("create_delivery_order", params: params)
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        // The RPC returns a JSON object with delivery_id, we need to fetch the full delivery order
+        guard let responseDict = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let deliveryIdString = responseDict["delivery_id"] as? String,
+              let deliveryId = UUID(uuidString: deliveryIdString) else {
+            throw NSError(domain: "DeliveryService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+        }
+        
+        // Fetch the created delivery order
+        return try await fetchDeliveryOrder(id: deliveryId)
+    }
+    
+    // MARK: - Fetch Delivery Order
+    func fetchDeliveryOrder(id: UUID) async throws -> DeliveryOrder {
+        let response = try await supabase
+            .from("delivery_orders")
+            .select("""
+                *,
+                delivery_lat:ST_Y(delivery_location::geometry),
+                delivery_lon:ST_X(delivery_location::geometry)
+            """)
+            .eq("id", value: id.uuidString)
+            .single()
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        return try decoder.decode(DeliveryOrder.self, from: response.data)
+    }
+    
+    // MARK: - Fetch Delivery Order by Order ID
+    func fetchDeliveryOrderByOrderId(orderId: UUID) async throws -> DeliveryOrder? {
+        let response = try await supabase
+            .from("delivery_orders")
+            .select("""
+                *,
+                delivery_lat:ST_Y(delivery_location::geometry),
+                delivery_lon:ST_X(delivery_location::geometry)
+            """)
+            .eq("order_id", value: orderId.uuidString)
+            .maybeSingle()
+            .execute()
+        
+        guard response.data.count > 0 else {
+            return nil
+        }
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        return try decoder.decode(DeliveryOrder.self, from: response.data)
+    }
+    
+    // MARK: - Fetch Courier Details
+    func fetchCourier(id: UUID) async throws -> Courier {
+        let response = try await supabase
+            .from("couriers")
+            .select("""
+                *,
+                current_lat:ST_Y(current_location::geometry),
+                current_lon:ST_X(current_location::geometry)
+            """)
+            .eq("id", value: id.uuidString)
+            .single()
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        return try decoder.decode(Courier.self, from: response.data)
+    }
+    
+    // MARK: - Get Available Couriers
+    func getAvailableCouriers(
+        latitude: Double,
+        longitude: Double,
+        radiusKm: Double = 5.0
+    ) async throws -> [Courier] {
+        let response = try await supabase
+            .rpc("get_available_couriers", params: [
+                "p_lat": latitude,
+                "p_lon": longitude,
+                "p_radius_km": radiusKm
+            ])
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        return try decoder.decode([Courier].self, from: response.data)
+    }
+    
+    // MARK: - Update Delivery Status
+    func updateDeliveryStatus(
+        deliveryOrderId: UUID,
+        newStatus: DeliveryStatus,
+        courierNotes: String? = nil
+    ) async throws {
+        var params: [String: Any] = [
+            "p_delivery_order_id": deliveryOrderId.uuidString,
+            "p_new_status": newStatus.rawValue
+        ]
+        
+        if let notes = courierNotes {
+            params["p_courier_notes"] = notes
+        }
+        
+        _ = try await supabase
+            .rpc("update_delivery_status", params: params)
+            .execute()
+    }
+    
+    // MARK: - Rate Delivery
+    func rateDelivery(
+        deliveryOrderId: UUID,
+        rating: Int,
+        feedback: String? = nil
+    ) async throws {
+        var updates: [String: Any] = [
+            "customer_rating": rating
+        ]
+        
+        if let feedback = feedback {
+            updates["customer_feedback"] = feedback
+        }
+        
+        _ = try await supabase
+            .from("delivery_orders")
+            .update(updates)
+            .eq("id", value: deliveryOrderId.uuidString)
+            .execute()
+        
+        // Update courier rating
+        if let delivery = try? await fetchDeliveryOrder(id: deliveryOrderId),
+           let courierId = delivery.courierId {
+            try await updateCourierRating(courierId: courierId)
+        }
+    }
+    
+    // MARK: - Update Courier Rating
+    private func updateCourierRating(courierId: UUID) async throws {
+        // Fetch all completed deliveries for this courier with ratings
+        let response = try await supabase
+            .from("delivery_orders")
+            .select("customer_rating")
+            .eq("courier_id", value: courierId.uuidString)
+            .eq("delivery_status", value: "delivered")
+            .not("customer_rating", operator: .is, value: "null")
+            .execute()
+        
+        let decoder = JSONDecoder()
+        guard let ratings = try? decoder.decode([[String: Int]].self, from: response.data) else {
+            return
+        }
+        
+        let ratingValues = ratings.compactMap { $0["customer_rating"] }
+        guard !ratingValues.isEmpty else { return }
+        
+        let averageRating = Double(ratingValues.reduce(0, +)) / Double(ratingValues.count)
+        
+        _ = try await supabase
+            .from("couriers")
+            .update(["rating": averageRating])
+            .eq("id", value: courierId.uuidString)
+            .execute()
+    }
+    
+    // MARK: - Check Delivery Zones
+    func getDeliveryZonesForCafe(cafeId: UUID) async throws -> [DeliveryZone] {
+        let response = try await supabase
+            .from("delivery_zones")
+            .select()
+            .eq("cafe_id", value: cafeId.uuidString)
+            .eq("is_active", value: true)
+            .execute()
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        return try decoder.decode([DeliveryZone].self, from: response.data)
+    }
+    
+    // MARK: - Track Delivery
+    func trackDelivery(orderId: UUID) async throws -> (delivery: DeliveryOrder, courier: Courier?) {
+        guard let delivery = try await fetchDeliveryOrderByOrderId(orderId: orderId) else {
+            throw NSError(domain: "DeliveryService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Delivery not found"])
+        }
+        
+        var courier: Courier? = nil
+        if let courierId = delivery.courierId {
+            courier = try? await fetchCourier(id: courierId)
+        }
+        
+        return (delivery, courier)
+    }
+    
+    // MARK: - Subscribe to Delivery Updates
+    func subscribeToDeliveryUpdates(
+        deliveryId: UUID,
+        onUpdate: @escaping (DeliveryOrder) -> Void
+    ) {
+        // Note: Real-time subscription would be implemented here
+        // For now, polling can be used
+        Task {
+            while true {
+                do {
+                    let delivery = try await fetchDeliveryOrder(id: deliveryId)
+                    await MainActor.run {
+                        onUpdate(delivery)
+                    }
+                    
+                    // Stop if delivery is completed or failed
+                    if delivery.deliveryStatus == .delivered || delivery.deliveryStatus == .failed {
+                        break
+                    }
+                } catch {
+                    print("Error fetching delivery update: \(error)")
+                }
+                
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+            }
+        }
+    }
+    
+    // MARK: - Subscribe to Courier Location
+    func subscribeToCourierLocation(
+        courierId: UUID,
+        onUpdate: @escaping (Courier) -> Void
+    ) {
+        // Note: Real-time subscription would be implemented here
+        // For now, polling can be used
+        Task {
+            var attempts = 0
+            let maxAttempts = 60 // 10 minutes with 10-second intervals
+            
+            while attempts < maxAttempts {
+                do {
+                    let courier = try await fetchCourier(id: courierId)
+                    await MainActor.run {
+                        onUpdate(courier)
+                    }
+                    
+                    // Stop if courier is no longer busy
+                    if courier.status != .busy {
+                        break
+                    }
+                } catch {
+                    print("Error fetching courier location: \(error)")
+                }
+                
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                attempts += 1
+            }
+        }
+    }
+}

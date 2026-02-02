@@ -1,0 +1,480 @@
+-- Migration: Recommendation System
+-- Description: Implements personalized recommendations for menu items and cafes
+-- Date: 2026-02-12
+
+-- ============================================================================
+-- 1. Create user_preferences table
+-- ============================================================================
+
+create table if not exists public.user_preferences (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade not null,
+  favorite_cafe_ids uuid[] default array[]::uuid[], -- Array of favorite cafe IDs
+  favorite_category text, -- 'drinks', 'food', 'syrups', 'merch'
+  preferred_order_time time, -- Typical order time
+  avg_order_value_credits int default 0,
+  last_updated timestamp with time zone default now(),
+  created_at timestamp with time zone default now(),
+  unique(user_id)
+);
+
+comment on table public.user_preferences is 'User preferences learned from order history';
+comment on column public.user_preferences.favorite_cafe_ids is 'Array of frequently visited cafe IDs';
+comment on column public.user_preferences.favorite_category is 'Most ordered menu category';
+
+-- Enable RLS
+alter table public.user_preferences enable row level security;
+
+-- Policies for user_preferences
+create policy "Users can view their own preferences"
+  on public.user_preferences for select
+  using (auth.uid() = user_id);
+
+create policy "Admin can view all preferences"
+  on public.user_preferences for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Index for lookups
+create index if not exists user_preferences_user_id_idx on public.user_preferences(user_id);
+
+-- ============================================================================
+-- 2. Create trending_items view
+-- ============================================================================
+
+create or replace view public.trending_items as
+select
+  mi.id as menu_item_id,
+  mi.cafe_id,
+  mi.category,
+  mi.title,
+  mi.name,
+  mi.description,
+  mi.price_credits,
+  c.name as cafe_name,
+  c.address as cafe_address,
+  count(oi.id) as order_count,
+  count(distinct oc.user_id) as unique_customers,
+  avg(mi.price_credits)::int as avg_price,
+  max(oc.created_at) as last_ordered_at
+from public.menu_items mi
+join public.cafes c on mi.cafe_id = c.id
+left join public.order_items oi on oi.menu_item_id = mi.id
+left join public.orders_core oc on oi.order_id = oc.id
+  and oc.status in ('preparing', 'ready', 'issued')
+  and oc.created_at >= now() - interval '7 days'
+where mi.is_available = true
+group by mi.id, mi.cafe_id, mi.category, mi.title, mi.name, mi.description, mi.price_credits, c.name, c.address
+having count(oi.id) > 0
+order by order_count desc, unique_customers desc;
+
+comment on view public.trending_items is 'Popular menu items from last 7 days';
+
+-- Grant access
+grant select on public.trending_items to authenticated;
+
+-- ============================================================================
+-- 3. Function: Update user preferences based on order history
+-- ============================================================================
+
+create or replace function public.update_user_preferences(p_user_id uuid)
+returns void
+language plpgsql
+security definer
+as $$
+declare
+  v_favorite_cafes uuid[];
+  v_favorite_category text;
+  v_avg_order_value int;
+  v_preferred_time time;
+begin
+  -- Get top 3 most visited cafes
+  select array_agg(cafe_id)
+  into v_favorite_cafes
+  from (
+    select cafe_id, count(*) as visit_count
+    from public.orders_core
+    where user_id = p_user_id
+      and status in ('preparing', 'ready', 'issued')
+    group by cafe_id
+    order by visit_count desc
+    limit 3
+  ) top_cafes;
+
+  -- Get most ordered category
+  select mi.category
+  into v_favorite_category
+  from public.order_items oi
+  join public.orders_core oc on oi.order_id = oc.id
+  join public.menu_items mi on oi.menu_item_id = mi.id
+  where oc.user_id = p_user_id
+    and oc.status in ('preparing', 'ready', 'issued')
+  group by mi.category
+  order by count(*) desc
+  limit 1;
+
+  -- Calculate average order value
+  select avg(paid_credits)::int
+  into v_avg_order_value
+  from public.orders_core
+  where user_id = p_user_id
+    and status in ('preparing', 'ready', 'issued');
+
+  -- Get preferred order time (median hour)
+  select (extract(hour from created_at) || ':00:00')::time
+  into v_preferred_time
+  from public.orders_core
+  where user_id = p_user_id
+    and status in ('preparing', 'ready', 'issued')
+  group by extract(hour from created_at)
+  order by count(*) desc
+  limit 1;
+
+  -- Upsert preferences
+  insert into public.user_preferences (
+    user_id,
+    favorite_cafe_ids,
+    favorite_category,
+    avg_order_value_credits,
+    preferred_order_time,
+    last_updated
+  )
+  values (
+    p_user_id,
+    coalesce(v_favorite_cafes, array[]::uuid[]),
+    v_favorite_category,
+    coalesce(v_avg_order_value, 0),
+    v_preferred_time,
+    now()
+  )
+  on conflict (user_id) do update set
+    favorite_cafe_ids = excluded.favorite_cafe_ids,
+    favorite_category = excluded.favorite_category,
+    avg_order_value_credits = excluded.avg_order_value_credits,
+    preferred_order_time = excluded.preferred_order_time,
+    last_updated = now();
+end;
+$$;
+
+comment on function public.update_user_preferences is 'Update user preferences based on order history';
+
+-- ============================================================================
+-- 4. Function: Get personalized recommendations
+-- ============================================================================
+
+create or replace function public.get_personalized_recommendations(
+  p_user_id uuid,
+  p_limit int default 10
+)
+returns table(
+  menu_item_id uuid,
+  cafe_id uuid,
+  cafe_name text,
+  category text,
+  title text,
+  name text,
+  description text,
+  price_credits int,
+  recommendation_reason text,
+  relevance_score numeric
+)
+language plpgsql
+security definer
+as $$
+declare
+  v_user_prefs record;
+  v_ordered_item_ids uuid[];
+begin
+  -- Update preferences first
+  perform public.update_user_preferences(p_user_id);
+
+  -- Get user preferences
+  select * into v_user_prefs
+  from public.user_preferences
+  where user_id = p_user_id;
+
+  -- Get items already ordered by user
+  select array_agg(distinct oi.menu_item_id)
+  into v_ordered_item_ids
+  from public.order_items oi
+  join public.orders_core oc on oi.order_id = oc.id
+  where oc.user_id = p_user_id;
+
+  -- Return recommendations with scoring
+  return query
+  with recommendations as (
+    -- Trending items in favorite cafes (highest priority)
+    select
+      ti.menu_item_id,
+      ti.cafe_id,
+      ti.cafe_name,
+      ti.category,
+      ti.title,
+      ti.name,
+      ti.description,
+      ti.price_credits,
+      'Popular in your favorite cafe' as recommendation_reason,
+      100.0 + (ti.order_count * 2) as relevance_score
+    from public.trending_items ti
+    where ti.cafe_id = any(v_user_prefs.favorite_cafe_ids)
+      and (v_ordered_item_ids is null or not (ti.menu_item_id = any(v_ordered_item_ids)))
+      and ti.price_credits <= (v_user_prefs.avg_order_value_credits * 1.5)
+
+    union all
+
+    -- Items in favorite category from trending (medium priority)
+    select
+      ti.menu_item_id,
+      ti.cafe_id,
+      ti.cafe_name,
+      ti.category,
+      ti.title,
+      ti.name,
+      ti.description,
+      ti.price_credits,
+      'Trending in your favorite category' as recommendation_reason,
+      80.0 + ti.order_count as relevance_score
+    from public.trending_items ti
+    where ti.category = v_user_prefs.favorite_category
+      and (v_ordered_item_ids is null or not (ti.menu_item_id = any(v_ordered_item_ids)))
+      and ti.price_credits <= (v_user_prefs.avg_order_value_credits * 1.5)
+      and not (ti.cafe_id = any(v_user_prefs.favorite_cafe_ids))
+
+    union all
+
+    -- Collaborative filtering: items ordered by similar users (medium priority)
+    select
+      mi.id as menu_item_id,
+      mi.cafe_id,
+      c.name as cafe_name,
+      mi.category,
+      mi.title,
+      mi.name,
+      mi.description,
+      mi.price_credits,
+      'Popular with users like you' as recommendation_reason,
+      60.0 + count(distinct oc.user_id) as relevance_score
+    from public.order_items oi
+    join public.orders_core oc on oi.order_id = oc.id
+    join public.menu_items mi on oi.menu_item_id = mi.id
+    join public.cafes c on mi.cafe_id = c.id
+    where oc.user_id in (
+      -- Find similar users (users who ordered from same cafes)
+      select distinct oc2.user_id
+      from public.orders_core oc2
+      where oc2.cafe_id = any(v_user_prefs.favorite_cafe_ids)
+        and oc2.user_id != p_user_id
+        and oc2.status in ('preparing', 'ready', 'issued')
+      limit 50
+    )
+    and oc.status in ('preparing', 'ready', 'issued')
+    and mi.is_available = true
+    and (v_ordered_item_ids is null or not (mi.id = any(v_ordered_item_ids)))
+    and mi.price_credits <= (v_user_prefs.avg_order_value_credits * 1.5)
+    group by mi.id, mi.cafe_id, c.name, mi.category, mi.title, mi.name, mi.description, mi.price_credits
+    having count(distinct oc.user_id) >= 2
+
+    union all
+
+    -- New items in favorite cafes (lower priority)
+    select
+      mi.id as menu_item_id,
+      mi.cafe_id,
+      c.name as cafe_name,
+      mi.category,
+      mi.title,
+      mi.name,
+      mi.description,
+      mi.price_credits,
+      'New in your favorite cafe' as recommendation_reason,
+      40.0 as relevance_score
+    from public.menu_items mi
+    join public.cafes c on mi.cafe_id = c.id
+    where mi.cafe_id = any(v_user_prefs.favorite_cafe_ids)
+      and mi.is_available = true
+      and mi.created_at >= now() - interval '30 days'
+      and (v_ordered_item_ids is null or not (mi.id = any(v_ordered_item_ids)))
+      and mi.price_credits <= (v_user_prefs.avg_order_value_credits * 1.5)
+  )
+  select distinct on (r.menu_item_id)
+    r.menu_item_id,
+    r.cafe_id,
+    r.cafe_name,
+    r.category,
+    r.title,
+    r.name,
+    r.description,
+    r.price_credits,
+    r.recommendation_reason,
+    r.relevance_score
+  from recommendations r
+  order by r.menu_item_id, r.relevance_score desc
+  limit p_limit;
+end;
+$$;
+
+comment on function public.get_personalized_recommendations is 'Get personalized menu item recommendations for user';
+
+-- ============================================================================
+-- 5. Function: Get cafe recommendations
+-- ============================================================================
+
+create or replace function public.get_cafe_recommendations(
+  p_user_id uuid,
+  p_limit int default 5
+)
+returns table(
+  cafe_id uuid,
+  cafe_name text,
+  address text,
+  latitude numeric,
+  longitude numeric,
+  recommendation_reason text,
+  relevance_score numeric
+)
+language plpgsql
+security definer
+as $$
+declare
+  v_visited_cafe_ids uuid[];
+  v_user_prefs record;
+begin
+  -- Update preferences first
+  perform public.update_user_preferences(p_user_id);
+
+  -- Get user preferences
+  select * into v_user_prefs
+  from public.user_preferences
+  where user_id = p_user_id;
+
+  -- Get cafes already visited
+  select array_agg(distinct cafe_id)
+  into v_visited_cafe_ids
+  from public.orders_core
+  where user_id = p_user_id;
+
+  -- Return cafe recommendations
+  return query
+  with cafe_recommendations as (
+    -- Cafes visited by similar users
+    select
+      c.id as cafe_id,
+      c.name as cafe_name,
+      c.address,
+      c.latitude,
+      c.longitude,
+      'Popular with users like you' as recommendation_reason,
+      count(distinct oc.user_id) * 10.0 as relevance_score
+    from public.cafes c
+    join public.orders_core oc on c.id = oc.cafe_id
+    where oc.user_id in (
+      -- Similar users who visited same cafes
+      select distinct oc2.user_id
+      from public.orders_core oc2
+      where oc2.cafe_id = any(v_user_prefs.favorite_cafe_ids)
+        and oc2.user_id != p_user_id
+      limit 100
+    )
+    and oc.status in ('preparing', 'ready', 'issued')
+    and (v_visited_cafe_ids is null or not (c.id = any(v_visited_cafe_ids)))
+    and c.is_active = true
+    group by c.id, c.name, c.address, c.latitude, c.longitude
+    having count(distinct oc.user_id) >= 3
+
+    union all
+
+    -- Cafes with popular items in user's favorite category
+    select
+      c.id as cafe_id,
+      c.name as cafe_name,
+      c.address,
+      c.latitude,
+      c.longitude,
+      format('Great %s selection', v_user_prefs.favorite_category) as recommendation_reason,
+      count(distinct mi.id) * 5.0 as relevance_score
+    from public.cafes c
+    join public.menu_items mi on c.id = mi.cafe_id
+    where mi.category = v_user_prefs.favorite_category
+      and mi.is_available = true
+      and (v_visited_cafe_ids is null or not (c.id = any(v_visited_cafe_ids)))
+      and c.is_active = true
+    group by c.id, c.name, c.address, c.latitude, c.longitude
+    having count(distinct mi.id) >= 5
+
+    union all
+
+    -- New cafes (recent additions)
+    select
+      c.id as cafe_id,
+      c.name as cafe_name,
+      c.address,
+      c.latitude,
+      c.longitude,
+      'Newly added cafe' as recommendation_reason,
+      30.0 as relevance_score
+    from public.cafes c
+    where c.created_at >= now() - interval '60 days'
+      and (v_visited_cafe_ids is null or not (c.id = any(v_visited_cafe_ids)))
+      and c.is_active = true
+  )
+  select
+    cr.cafe_id,
+    cr.cafe_name,
+    cr.address,
+    cr.latitude,
+    cr.longitude,
+    cr.recommendation_reason,
+    max(cr.relevance_score) as relevance_score
+  from cafe_recommendations cr
+  group by cr.cafe_id, cr.cafe_name, cr.address, cr.latitude, cr.longitude, cr.recommendation_reason
+  order by relevance_score desc
+  limit p_limit;
+end;
+$$;
+
+comment on function public.get_cafe_recommendations is 'Get personalized cafe recommendations for user';
+
+-- ============================================================================
+-- 6. Trigger: Auto-update preferences after order
+-- ============================================================================
+
+create or replace function public.trigger_update_preferences_on_order()
+returns trigger
+language plpgsql
+security definer
+as $$
+begin
+  -- Update preferences when order is issued
+  if NEW.status = 'issued' and (OLD.status is null or OLD.status != 'issued') then
+    perform public.update_user_preferences(NEW.user_id);
+  end if;
+  return NEW;
+end;
+$$;
+
+drop trigger if exists trigger_update_preferences on public.orders_core;
+create trigger trigger_update_preferences
+  after insert or update on public.orders_core
+  for each row
+  execute function public.trigger_update_preferences_on_order();
+
+-- ============================================================================
+-- 7. Grant permissions
+-- ============================================================================
+
+grant select on public.user_preferences to authenticated;
+grant select on public.trending_items to authenticated;
+
+grant execute on function public.update_user_preferences to authenticated;
+grant execute on function public.get_personalized_recommendations to authenticated;
+grant execute on function public.get_cafe_recommendations to authenticated;
+
+-- ============================================================================
+-- 8. Additional comments
+-- ============================================================================
+
+comment on function public.trigger_update_preferences_on_order is 'Auto-update user preferences when order is completed';

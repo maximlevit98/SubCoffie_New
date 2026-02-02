@@ -1,0 +1,268 @@
+//
+//  LoyaltyService.swift
+//  SubscribeCoffieClean
+//
+//  Service for loyalty program operations
+//
+
+import Foundation
+
+@MainActor
+class LoyaltyService: ObservableObject {
+    private let apiClient: SupabaseAPIClient
+    
+    init(apiClient: SupabaseAPIClient = .shared) {
+        self.apiClient = apiClient
+    }
+    
+    // MARK: - Loyalty Dashboard
+    
+    /// Fetch complete loyalty dashboard for user
+    func getLoyaltyDashboard(userId: UUID) async throws -> LoyaltyDashboard {
+        let response = try await apiClient.rpc(
+            "get_loyalty_dashboard",
+            params: ["p_user_id": userId.uuidString]
+        )
+        
+        // Parse the complex JSON response
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: response),
+              let dashboard = try? JSONDecoder().decode(LoyaltyDashboardResponse.self, from: jsonData) else {
+            throw NetworkError.decoding(NSError(domain: "LoyaltyService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse loyalty dashboard"]))
+        }
+        
+        return dashboard.asDomain()
+    }
+    
+    // MARK: - Loyalty Levels
+    
+    /// Fetch all loyalty levels
+    func getLoyaltyLevels() async throws -> [LoyaltyLevel] {
+        let response: [SupabaseLoyaltyLevelDTO] = try await apiClient.select(
+            table: "loyalty_levels",
+            columns: "*"
+        )
+        
+        return response.compactMap { $0.asDomain() }
+            .sorted { $0.levelOrder < $1.levelOrder }
+    }
+    
+    // MARK: - Achievements
+    
+    /// Fetch all available achievements
+    func getAchievements() async throws -> [Achievement] {
+        let response: [SupabaseAchievementDTO] = try await apiClient.select(
+            table: "achievements",
+            columns: "*"
+        )
+        
+        return response.compactMap { $0.asDomain() }
+            .sorted { $0.pointsReward > $1.pointsReward }
+    }
+    
+    /// Fetch user's unlocked achievements
+    func getUserAchievements(userId: UUID) async throws -> [UserAchievement] {
+        let response: [[String: AnyCodable]] = try await apiClient.select(
+            table: "user_achievements",
+            columns: "*",
+            filters: ["user_id": "eq.\(userId.uuidString)"]
+        )
+        
+        var achievements: [UserAchievement] = []
+        for item in response {
+            if let id = item["id"]?.value as? String,
+               let achievementId = UUID(uuidString: id),
+               let userIdStr = item["user_id"]?.value as? String,
+               let userId = UUID(uuidString: userIdStr),
+               let achievementIdStr = item["achievement_id"]?.value as? String,
+               let achId = UUID(uuidString: achievementIdStr) {
+                
+                let unlockedAtStr = item["unlocked_at"]?.value as? String
+                let unlockedAt = unlockedAtStr.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date()
+                
+                let notified = item["notified"]?.value as? Bool ?? false
+                
+                let achievement = UserAchievement(
+                    id: achievementId,
+                    userId: userId,
+                    achievementId: achId,
+                    unlockedAt: unlockedAt,
+                    notified: notified
+                )
+                achievements.append(achievement)
+            }
+        }
+        
+        return achievements.sorted { $0.unlockedAt > $1.unlockedAt }
+    }
+    
+    // MARK: - Points History
+    
+    /// Fetch user's loyalty points history
+    func getPointsHistory(userId: UUID, limit: Int = 50) async throws -> [LoyaltyPointsHistory] {
+        let response: [SupabaseLoyaltyPointsHistoryDTO] = try await apiClient.select(
+            table: "loyalty_points_history",
+            columns: "*",
+            filters: ["user_id": "eq.\(userId.uuidString)"]
+        )
+        
+        return response.compactMap { $0.asDomain() }
+            .sorted { $0.createdAt > $1.createdAt }
+            .prefix(limit)
+            .map { $0 }
+    }
+    
+    // MARK: - Leaderboard
+    
+    /// Fetch loyalty leaderboard
+    func getLeaderboard(limit: Int = 100) async throws -> [LeaderboardEntry] {
+        let response: [[String: AnyCodable]] = try await apiClient.rpc(
+            "get_loyalty_leaderboard",
+            params: ["p_limit": limit]
+        )
+        
+        var entries: [LeaderboardEntry] = []
+        for item in response {
+            if let rank = item["rank"]?.value as? Int,
+               let userIdStr = item["user_id"]?.value as? String,
+               let userId = UUID(uuidString: userIdStr),
+               let points = item["total_points"]?.value as? Int,
+               let levelName = item["level_name"]?.value as? String,
+               let orders = item["lifetime_orders"]?.value as? Int {
+                
+                let entry = LeaderboardEntry(
+                    rank: rank,
+                    userId: userId,
+                    totalPoints: points,
+                    levelName: levelName,
+                    lifetimeOrders: orders
+                )
+                entries.append(entry)
+            }
+        }
+        
+        return entries
+    }
+    
+    // MARK: - Initialize Loyalty
+    
+    /// Initialize loyalty program for new user (called automatically by backend trigger)
+    func initializeLoyalty(userId: UUID) async throws {
+        _ = try await apiClient.rpc(
+            "initialize_user_loyalty",
+            params: ["p_user_id": userId.uuidString]
+        )
+    }
+    
+    // MARK: - Check for New Achievements
+    
+    /// Manually trigger achievement check (usually done automatically by backend)
+    func checkAchievements(userId: UUID) async throws -> CheckAchievementsResponse {
+        let response = try await apiClient.rpc(
+            "check_and_unlock_achievements",
+            params: ["p_user_id": userId.uuidString]
+        )
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: response),
+              let result = try? JSONDecoder().decode(CheckAchievementsResponse.self, from: jsonData) else {
+            throw NetworkError.decoding(NSError(domain: "LoyaltyService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse achievements response"]))
+        }
+        
+        return result
+    }
+}
+
+// MARK: - Response Types
+
+struct LoyaltyDashboardResponse: Codable {
+    let user_loyalty: SupabaseUserLoyaltyDTO?
+    let current_level: SupabaseLoyaltyLevelDTO?
+    let unlocked_achievements: [UnlockedAchievementDTO]
+    let locked_achievements: [SupabaseAchievementDTO]
+    let recent_points_history: [SupabaseLoyaltyPointsHistoryDTO]
+    
+    struct UnlockedAchievementDTO: Codable {
+        let achievement: SupabaseAchievementDTO
+        let unlocked_at: String
+    }
+    
+    func asDomain() -> LoyaltyDashboard {
+        let unlockedAchievements = unlocked_achievements.compactMap { dto -> LoyaltyDashboard.AchievementWithDate? in
+            guard let achievement = dto.achievement.asDomain() else { return nil }
+            let date = ISO8601DateFormatter().date(from: dto.unlocked_at) ?? Date()
+            return LoyaltyDashboard.AchievementWithDate(achievement: achievement, unlockedAt: date)
+        }
+        
+        let lockedAchievements = locked_achievements.compactMap { $0.asDomain() }
+        let pointsHistory = recent_points_history.compactMap { $0.asDomain() }
+        
+        return LoyaltyDashboard(
+            userLoyalty: user_loyalty?.asDomain(),
+            currentLevel: current_level?.asDomain(),
+            unlockedAchievements: unlockedAchievements,
+            lockedAchievements: lockedAchievements,
+            recentPointsHistory: pointsHistory
+        )
+    }
+}
+
+struct CheckAchievementsResponse: Codable {
+    let unlocked_count: Int
+    let achievements: [AchievementUnlocked]
+    
+    struct AchievementUnlocked: Codable {
+        let id: UUID
+        let title: String
+        let points: Int
+    }
+}
+
+// MARK: - AnyCodable for dynamic JSON
+
+struct AnyCodable: Codable {
+    let value: Any
+    
+    init(_ value: Any) {
+        self.value = value
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        
+        if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let array = try? container.decode([AnyCodable].self) {
+            value = array.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value }
+        } else {
+            value = NSNull()
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        
+        switch value {
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let string as String:
+            try container.encode(string)
+        case let bool as Bool:
+            try container.encode(bool)
+        case let array as [Any]:
+            try container.encode(array.map { AnyCodable($0) })
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
+        default:
+            try container.encodeNil()
+        }
+    }
+}

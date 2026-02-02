@@ -1,0 +1,176 @@
+import SwiftUI
+
+struct LoginHistoryView: View {
+    @StateObject private var authService = AuthService()
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var loginHistory: [LoginHistoryItemStub] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        NavigationView {
+            Group {
+                if isLoading {
+                    ProgressView("Загрузка...")
+                } else if let errorMessage {
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 50))
+                            .foregroundColor(.orange)
+                        
+                        Text(errorMessage)
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                        
+                        Button("Повторить") {
+                            Task {
+                                await loadHistory()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding()
+                } else if loginHistory.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 50))
+                            .foregroundColor(.secondary)
+                        
+                        Text("История входов пуста")
+                            .font(.headline)
+                        
+                        Text("Здесь будут отображаться ваши последние входы в систему")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                } else {
+                    List {
+                        ForEach(loginHistory) { item in
+                            LoginHistoryRow(item: item)
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("История входов")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Закрыть") {
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await loadHistory()
+            }
+        }
+    }
+    
+    private func loadHistory() async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        
+        do {
+            loginHistory = try await authService.getLoginHistory()
+        } catch {
+            errorMessage = "Не удалось загрузить историю: \(error.localizedDescription)"
+        }
+    }
+}
+
+struct LoginHistoryRow: View {
+    let item: LoginHistoryItemStub
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                // Success/Failure indicator
+                Image(systemName: item.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundColor(item.success ? .green : .red)
+                
+                // Login method
+                Text(loginMethodName(item.loginMethod))
+                    .font(.headline)
+                
+                Spacer()
+                
+                // Date
+                Text(formatDate(item.createdAt))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            // Device info
+            if let userAgent = item.userAgent {
+                Text(userAgent)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            // IP Address
+            if let ipAddress = item.ipAddress {
+                HStack {
+                    Image(systemName: "network")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text(ipAddress)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            // Failure reason
+            if !item.success, let failureReason = item.failureReason {
+                Text(failureReason)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.top, 4)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private func loginMethodName(_ method: String) -> String {
+        switch method {
+        case "email": return "Email"
+        case "google": return "Google"
+        case "apple": return "Apple"
+        case "phone": return "Телефон"
+        case "magic_link": return "Magic Link"
+        default: return method.capitalized
+        }
+    }
+    
+    private func formatDate(_ dateString: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: dateString) else {
+            return dateString
+        }
+        
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateStyle = .short
+        displayFormatter.timeStyle = .short
+        displayFormatter.locale = Locale(identifier: "ru_RU")
+        
+        return displayFormatter.string(from: date)
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateStyle = .short
+        displayFormatter.timeStyle = .short
+        displayFormatter.locale = Locale(identifier: "ru_RU")
+        
+        return displayFormatter.string(from: date)
+    }
+}
+
+#Preview {
+    LoginHistoryView()
+}

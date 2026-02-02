@@ -1,0 +1,686 @@
+-- ================================================
+-- SUBSCRIPTION MODEL IMPLEMENTATION
+-- ================================================
+-- This migration implements the subscription-based model
+-- with different tiers (Basic, Premium, VIP) and their benefits
+
+-- ================================================
+-- TABLES
+-- ================================================
+
+-- Subscription plans (Basic, Premium, VIP)
+CREATE TABLE IF NOT EXISTS subscription_plans (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    name_ru TEXT NOT NULL,
+    description TEXT,
+    description_ru TEXT,
+    price_credits INTEGER NOT NULL CHECK (price_credits >= 0),
+    billing_period TEXT NOT NULL DEFAULT 'monthly' CHECK (billing_period IN ('monthly', 'yearly')),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE subscription_plans IS 'Available subscription plans with pricing';
+COMMENT ON COLUMN subscription_plans.price_credits IS 'Price in credits (100 credits = 1 ruble)';
+COMMENT ON COLUMN subscription_plans.billing_period IS 'Billing frequency: monthly or yearly';
+
+-- User subscriptions
+CREATE TABLE IF NOT EXISTS user_subscriptions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    plan_id UUID NOT NULL REFERENCES subscription_plans(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'expired', 'suspended')),
+    payment_method_id UUID REFERENCES payment_methods(id) ON DELETE SET NULL,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    current_period_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+    current_period_end TIMESTAMPTZ NOT NULL,
+    cancelled_at TIMESTAMPTZ,
+    cancel_reason TEXT,
+    auto_renew BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    
+    -- Ensure user has only one active subscription at a time
+    CONSTRAINT unique_active_subscription UNIQUE (user_id, status) 
+        WHERE status = 'active'
+);
+
+COMMENT ON TABLE user_subscriptions IS 'User subscription records';
+COMMENT ON COLUMN user_subscriptions.status IS 'Subscription status: active, cancelled, expired, or suspended';
+COMMENT ON COLUMN user_subscriptions.current_period_end IS 'End date of current billing period';
+COMMENT ON COLUMN user_subscriptions.auto_renew IS 'Whether subscription should auto-renew';
+
+-- Subscription benefits
+CREATE TABLE IF NOT EXISTS subscription_benefits (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plan_id UUID NOT NULL REFERENCES subscription_plans(id) ON DELETE CASCADE,
+    benefit_type TEXT NOT NULL CHECK (benefit_type IN ('cashback', 'free_delivery', 'priority_support', 'exclusive_promos', 'discount', 'other')),
+    benefit_name TEXT NOT NULL,
+    benefit_name_ru TEXT NOT NULL,
+    benefit_value TEXT NOT NULL,
+    description TEXT,
+    description_ru TEXT,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    
+    UNIQUE (plan_id, benefit_type, benefit_name)
+);
+
+COMMENT ON TABLE subscription_benefits IS 'Benefits associated with each subscription plan';
+COMMENT ON COLUMN subscription_benefits.benefit_type IS 'Type of benefit: cashback, free_delivery, priority_support, exclusive_promos, discount, other';
+COMMENT ON COLUMN subscription_benefits.benefit_value IS 'Numeric or text value of the benefit (e.g., "10" for 10% cashback)';
+
+-- Subscription payment history
+CREATE TABLE IF NOT EXISTS subscription_payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subscription_id UUID NOT NULL REFERENCES user_subscriptions(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    amount_credits INTEGER NOT NULL CHECK (amount_credits >= 0),
+    payment_method_id UUID REFERENCES payment_methods(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+    provider_transaction_id TEXT,
+    period_start TIMESTAMPTZ NOT NULL,
+    period_end TIMESTAMPTZ NOT NULL,
+    paid_at TIMESTAMPTZ,
+    failed_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE subscription_payments IS 'Payment history for subscription renewals';
+
+-- ================================================
+-- INDEXES
+-- ================================================
+
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user_id ON user_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_status ON user_subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_period_end ON user_subscriptions(current_period_end);
+CREATE INDEX IF NOT EXISTS idx_subscription_benefits_plan_id ON subscription_benefits(plan_id);
+CREATE INDEX IF NOT EXISTS idx_subscription_payments_subscription_id ON subscription_payments(subscription_id);
+CREATE INDEX IF NOT EXISTS idx_subscription_payments_user_id ON subscription_payments(user_id);
+
+-- ================================================
+-- RLS POLICIES
+-- ================================================
+
+ALTER TABLE subscription_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscription_benefits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscription_payments ENABLE ROW LEVEL SECURITY;
+
+-- Subscription plans: public read, admin write
+CREATE POLICY "Anyone can view active subscription plans"
+    ON subscription_plans FOR SELECT
+    USING (is_active = true);
+
+CREATE POLICY "Admins can manage subscription plans"
+    ON subscription_plans FOR ALL
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles
+            WHERE profiles.id = auth.uid()
+            AND profiles.role = 'admin'
+        )
+    );
+
+-- User subscriptions: users see their own, admins see all
+CREATE POLICY "Users can view their own subscriptions"
+    ON user_subscriptions FOR SELECT
+    USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can view all subscriptions"
+    ON user_subscriptions FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles
+            WHERE profiles.id = auth.uid()
+            AND profiles.role IN ('admin', 'owner')
+        )
+    );
+
+-- Benefits: public read for active plans
+CREATE POLICY "Anyone can view benefits for active plans"
+    ON subscription_benefits FOR SELECT
+    USING (
+        is_active = true
+        AND EXISTS (
+            SELECT 1 FROM subscription_plans
+            WHERE subscription_plans.id = subscription_benefits.plan_id
+            AND subscription_plans.is_active = true
+        )
+    );
+
+CREATE POLICY "Admins can manage subscription benefits"
+    ON subscription_benefits FOR ALL
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles
+            WHERE profiles.id = auth.uid()
+            AND profiles.role = 'admin'
+        )
+    );
+
+-- Subscription payments: users see their own, admins see all
+CREATE POLICY "Users can view their own subscription payments"
+    ON subscription_payments FOR SELECT
+    USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can view all subscription payments"
+    ON subscription_payments FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles
+            WHERE profiles.id = auth.uid()
+            AND profiles.role IN ('admin', 'owner')
+        )
+    );
+
+-- ================================================
+-- TRIGGERS
+-- ================================================
+
+-- Update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_subscription_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_subscription_plans_updated_at
+    BEFORE UPDATE ON subscription_plans
+    FOR EACH ROW
+    EXECUTE FUNCTION update_subscription_updated_at();
+
+CREATE TRIGGER update_user_subscriptions_updated_at
+    BEFORE UPDATE ON user_subscriptions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_subscription_updated_at();
+
+-- ================================================
+-- RPC FUNCTIONS
+-- ================================================
+
+-- Get all active subscription plans with benefits
+CREATE OR REPLACE FUNCTION get_subscription_plans()
+RETURNS TABLE (
+    id UUID,
+    name TEXT,
+    name_ru TEXT,
+    description TEXT,
+    description_ru TEXT,
+    price_credits INTEGER,
+    billing_period TEXT,
+    display_order INTEGER,
+    benefits JSONB
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        sp.id,
+        sp.name,
+        sp.name_ru,
+        sp.description,
+        sp.description_ru,
+        sp.price_credits,
+        sp.billing_period,
+        sp.display_order,
+        COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'id', sb.id,
+                    'benefit_type', sb.benefit_type,
+                    'benefit_name', sb.benefit_name,
+                    'benefit_name_ru', sb.benefit_name_ru,
+                    'benefit_value', sb.benefit_value,
+                    'description', sb.description,
+                    'description_ru', sb.description_ru
+                )
+                ORDER BY sb.display_order
+            ) FILTER (WHERE sb.id IS NOT NULL),
+            '[]'::jsonb
+        ) as benefits
+    FROM subscription_plans sp
+    LEFT JOIN subscription_benefits sb ON sp.id = sb.plan_id AND sb.is_active = true
+    WHERE sp.is_active = true
+    GROUP BY sp.id, sp.name, sp.name_ru, sp.description, sp.description_ru, sp.price_credits, sp.billing_period, sp.display_order
+    ORDER BY sp.display_order;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Subscribe user to a plan (mock payment for MVP)
+CREATE OR REPLACE FUNCTION subscribe_user(
+    p_user_id UUID,
+    p_plan_id UUID,
+    p_payment_method_id UUID DEFAULT NULL
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_plan subscription_plans%ROWTYPE;
+    v_subscription_id UUID;
+    v_period_end TIMESTAMPTZ;
+    v_payment_id UUID;
+BEGIN
+    -- Get plan details
+    SELECT * INTO v_plan
+    FROM subscription_plans
+    WHERE id = p_plan_id AND is_active = true;
+    
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Plan not found or inactive'
+        );
+    END IF;
+    
+    -- Check if user already has an active subscription
+    IF EXISTS (
+        SELECT 1 FROM user_subscriptions
+        WHERE user_id = p_user_id AND status = 'active'
+    ) THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'User already has an active subscription'
+        );
+    END IF;
+    
+    -- Calculate period end based on billing period
+    IF v_plan.billing_period = 'monthly' THEN
+        v_period_end := now() + INTERVAL '1 month';
+    ELSIF v_plan.billing_period = 'yearly' THEN
+        v_period_end := now() + INTERVAL '1 year';
+    END IF;
+    
+    -- Create subscription
+    INSERT INTO user_subscriptions (
+        user_id,
+        plan_id,
+        status,
+        payment_method_id,
+        current_period_start,
+        current_period_end,
+        auto_renew
+    ) VALUES (
+        p_user_id,
+        p_plan_id,
+        'active',
+        p_payment_method_id,
+        now(),
+        v_period_end,
+        true
+    )
+    RETURNING id INTO v_subscription_id;
+    
+    -- Create mock payment record (completed for MVP)
+    INSERT INTO subscription_payments (
+        subscription_id,
+        user_id,
+        amount_credits,
+        payment_method_id,
+        status,
+        provider_transaction_id,
+        period_start,
+        period_end,
+        paid_at
+    ) VALUES (
+        v_subscription_id,
+        p_user_id,
+        v_plan.price_credits,
+        p_payment_method_id,
+        'completed',
+        'mock_' || gen_random_uuid()::text,
+        now(),
+        v_period_end,
+        now()
+    )
+    RETURNING id INTO v_payment_id;
+    
+    RETURN jsonb_build_object(
+        'success', true,
+        'subscription_id', v_subscription_id,
+        'payment_id', v_payment_id,
+        'period_end', v_period_end,
+        'amount_paid', v_plan.price_credits
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Cancel user subscription
+CREATE OR REPLACE FUNCTION cancel_subscription(
+    p_subscription_id UUID,
+    p_cancel_reason TEXT DEFAULT NULL
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_user_id UUID;
+BEGIN
+    -- Get user_id and verify ownership
+    SELECT user_id INTO v_user_id
+    FROM user_subscriptions
+    WHERE id = p_subscription_id;
+    
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Subscription not found'
+        );
+    END IF;
+    
+    -- Verify user owns this subscription or is admin
+    IF v_user_id != auth.uid() AND NOT EXISTS (
+        SELECT 1 FROM profiles
+        WHERE id = auth.uid() AND role = 'admin'
+    ) THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Unauthorized'
+        );
+    END IF;
+    
+    -- Update subscription (will remain active until period end)
+    UPDATE user_subscriptions
+    SET
+        auto_renew = false,
+        cancelled_at = now(),
+        cancel_reason = p_cancel_reason,
+        updated_at = now()
+    WHERE id = p_subscription_id AND status = 'active';
+    
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Subscription is not active'
+        );
+    END IF;
+    
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Subscription will remain active until current period ends'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Check subscription benefits for a user
+CREATE OR REPLACE FUNCTION check_subscription_benefits(p_user_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_subscription user_subscriptions%ROWTYPE;
+    v_benefits JSONB;
+BEGIN
+    -- Get active subscription
+    SELECT * INTO v_subscription
+    FROM user_subscriptions
+    WHERE user_id = p_user_id
+    AND status = 'active'
+    AND current_period_end > now()
+    LIMIT 1;
+    
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'has_subscription', false,
+            'benefits', '[]'::jsonb
+        );
+    END IF;
+    
+    -- Get benefits for the plan
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'benefit_type', benefit_type,
+            'benefit_name', benefit_name,
+            'benefit_name_ru', benefit_name_ru,
+            'benefit_value', benefit_value,
+            'description', description,
+            'description_ru', description_ru
+        )
+        ORDER BY display_order
+    ) INTO v_benefits
+    FROM subscription_benefits
+    WHERE plan_id = v_subscription.plan_id
+    AND is_active = true;
+    
+    RETURN jsonb_build_object(
+        'has_subscription', true,
+        'subscription_id', v_subscription.id,
+        'plan_id', v_subscription.plan_id,
+        'period_end', v_subscription.current_period_end,
+        'benefits', COALESCE(v_benefits, '[]'::jsonb)
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Get user's current subscription details
+CREATE OR REPLACE FUNCTION get_user_subscription(p_user_id UUID)
+RETURNS JSONB AS $$
+DECLARE
+    v_result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'subscription', jsonb_build_object(
+            'id', us.id,
+            'status', us.status,
+            'started_at', us.started_at,
+            'current_period_start', us.current_period_start,
+            'current_period_end', us.current_period_end,
+            'cancelled_at', us.cancelled_at,
+            'auto_renew', us.auto_renew
+        ),
+        'plan', jsonb_build_object(
+            'id', sp.id,
+            'name', sp.name,
+            'name_ru', sp.name_ru,
+            'description', sp.description,
+            'description_ru', sp.description_ru,
+            'price_credits', sp.price_credits,
+            'billing_period', sp.billing_period
+        ),
+        'benefits', COALESCE(
+            (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'benefit_type', sb.benefit_type,
+                        'benefit_name', sb.benefit_name,
+                        'benefit_name_ru', sb.benefit_name_ru,
+                        'benefit_value', sb.benefit_value,
+                        'description', sb.description,
+                        'description_ru', sb.description_ru
+                    )
+                    ORDER BY sb.display_order
+                )
+                FROM subscription_benefits sb
+                WHERE sb.plan_id = sp.id AND sb.is_active = true
+            ),
+            '[]'::jsonb
+        )
+    ) INTO v_result
+    FROM user_subscriptions us
+    JOIN subscription_plans sp ON us.plan_id = sp.id
+    WHERE us.user_id = p_user_id
+    AND us.status = 'active'
+    ORDER BY us.created_at DESC
+    LIMIT 1;
+    
+    IF v_result IS NULL THEN
+        RETURN jsonb_build_object(
+            'has_subscription', false
+        );
+    ELSE
+        RETURN jsonb_build_object(
+            'has_subscription', true,
+            'data', v_result
+        );
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Expire subscriptions (to be called by cron job)
+CREATE OR REPLACE FUNCTION expire_subscriptions()
+RETURNS INTEGER AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    -- Expire subscriptions that have passed their period end
+    UPDATE user_subscriptions
+    SET status = 'expired'
+    WHERE status = 'active'
+    AND current_period_end < now()
+    AND auto_renew = false;
+    
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ================================================
+-- SEED DATA (Default Plans)
+-- ================================================
+
+-- Insert default subscription plans
+INSERT INTO subscription_plans (name, name_ru, description, description_ru, price_credits, billing_period, display_order)
+VALUES
+    (
+        'basic',
+        'Базовый',
+        'Perfect for occasional coffee lovers',
+        'Идеально для тех, кто любит кофе время от времени',
+        29900, -- ₽299
+        'monthly',
+        1
+    ),
+    (
+        'premium',
+        'Премиум',
+        'For regular coffee enthusiasts',
+        'Для настоящих кофейных энтузиастов',
+        59900, -- ₽599
+        'monthly',
+        2
+    ),
+    (
+        'vip',
+        'VIP',
+        'Ultimate coffee experience',
+        'Максимальный кофейный опыт',
+        149900, -- ₽1499
+        'monthly',
+        3
+    )
+ON CONFLICT (name) DO NOTHING;
+
+-- Insert benefits for Basic plan
+INSERT INTO subscription_benefits (plan_id, benefit_type, benefit_name, benefit_name_ru, benefit_value, description, description_ru, display_order)
+SELECT
+    id,
+    'cashback',
+    '5% Cashback',
+    '5% Кэшбек',
+    '5',
+    'Get 5% cashback on all orders',
+    'Получайте 5% кэшбека со всех заказов',
+    1
+FROM subscription_plans WHERE name = 'basic'
+ON CONFLICT DO NOTHING;
+
+-- Insert benefits for Premium plan
+INSERT INTO subscription_benefits (plan_id, benefit_type, benefit_name, benefit_name_ru, benefit_value, description, description_ru, display_order)
+SELECT
+    id,
+    benefit_type,
+    benefit_name,
+    benefit_name_ru,
+    benefit_value,
+    description,
+    description_ru,
+    display_order
+FROM (
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'premium') as id,
+        'cashback' as benefit_type,
+        '10% Cashback' as benefit_name,
+        '10% Кэшбек' as benefit_name_ru,
+        '10' as benefit_value,
+        'Get 10% cashback on all orders' as description,
+        'Получайте 10% кэшбека со всех заказов' as description_ru,
+        1 as display_order
+    UNION ALL
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'premium'),
+        'free_delivery',
+        'Free Delivery',
+        'Бесплатная доставка',
+        'unlimited',
+        'Free delivery on all orders',
+        'Бесплатная доставка всех заказов',
+        2
+) benefits
+ON CONFLICT DO NOTHING;
+
+-- Insert benefits for VIP plan
+INSERT INTO subscription_benefits (plan_id, benefit_type, benefit_name, benefit_name_ru, benefit_value, description, description_ru, display_order)
+SELECT
+    id,
+    benefit_type,
+    benefit_name,
+    benefit_name_ru,
+    benefit_value,
+    description,
+    description_ru,
+    display_order
+FROM (
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'vip') as id,
+        'cashback' as benefit_type,
+        '15% Cashback' as benefit_name,
+        '15% Кэшбек' as benefit_name_ru,
+        '15' as benefit_value,
+        'Get 15% cashback on all orders' as description,
+        'Получайте 15% кэшбека со всех заказов' as description_ru,
+        1 as display_order
+    UNION ALL
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'vip'),
+        'free_delivery',
+        'Free Delivery',
+        'Бесплатная доставка',
+        'unlimited',
+        'Free delivery on all orders',
+        'Бесплатная доставка всех заказов',
+        2
+    UNION ALL
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'vip'),
+        'priority_support',
+        'Priority Support',
+        'Приоритетная поддержка',
+        '24/7',
+        '24/7 priority customer support',
+        'Круглосуточная приоритетная поддержка',
+        3
+    UNION ALL
+    SELECT
+        (SELECT id FROM subscription_plans WHERE name = 'vip'),
+        'exclusive_promos',
+        'Exclusive Promotions',
+        'Эксклюзивные акции',
+        'unlimited',
+        'Access to exclusive promotions and offers',
+        'Доступ к эксклюзивным акциям и предложениям',
+        4
+) benefits
+ON CONFLICT DO NOTHING;
+
+-- ================================================
+-- COMMENTS
+-- ================================================
+
+COMMENT ON FUNCTION get_subscription_plans() IS 'Returns all active subscription plans with their benefits';
+COMMENT ON FUNCTION subscribe_user(UUID, UUID, UUID) IS 'Subscribe user to a plan (mock payment for MVP)';
+COMMENT ON FUNCTION cancel_subscription(UUID, TEXT) IS 'Cancel user subscription (remains active until period end)';
+COMMENT ON FUNCTION check_subscription_benefits(UUID) IS 'Check what benefits a user has from their active subscription';
+COMMENT ON FUNCTION get_user_subscription(UUID) IS 'Get user current subscription details with plan and benefits';
+COMMENT ON FUNCTION expire_subscriptions() IS 'Expire subscriptions that have passed their end date (for cron job)';

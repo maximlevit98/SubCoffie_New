@@ -1,0 +1,450 @@
+import SwiftUI
+
+struct OrderHistoryView: View {
+    @State private var orders: [OrderHistoryItem] = []
+    @State private var filteredOrders: [OrderHistoryItem] = []
+    @State private var statistics: OrderStatistics?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var searchText = ""
+    @State private var selectedFilter: OrderStatusFilter = .all
+    @State private var showReorderConfirmation = false
+    @State private var selectedOrderForReorder: OrderHistoryItem?
+    @State private var isReordering = false
+    
+    let phone: String
+    let onOrderCreated: (UUID) -> Void
+    
+    private let orderService = OrderService()
+    
+    enum OrderStatusFilter: String, CaseIterable {
+        case all = "Все"
+        case active = "Активные"
+        case completed = "Завершённые"
+        case canceled = "Отменённые"
+    }
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Statistics header
+                if let stats = statistics {
+                    statisticsHeader(stats)
+                        .padding()
+                        .background(Color.blue.opacity(0.1))
+                }
+                
+                // Search and filter bar
+                VStack(spacing: 12) {
+                    // Search
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Поиск по названию кафе или блюда", text: $searchText)
+                            .textFieldStyle(.plain)
+                    }
+                    .padding(10)
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(10)
+                    
+                    // Filter chips
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(OrderStatusFilter.allCases, id: \.self) { filter in
+                                filterChip(filter)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 12)
+                
+                // Orders list
+                if isLoading && orders.isEmpty {
+                    Spacer()
+                    ProgressView("Загружаем историю...")
+                    Spacer()
+                } else if let errorMessage = errorMessage {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.orange)
+                        Text("Ошибка загрузки")
+                            .font(.headline)
+                        Text(errorMessage)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Повторить") {
+                            Task { await loadOrders() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding()
+                    Spacer()
+                } else if filteredOrders.isEmpty {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: searchText.isEmpty ? "tray" : "magnifyingglass")
+                            .font(.system(size: 50))
+                            .foregroundColor(.secondary)
+                        Text(searchText.isEmpty ? "История заказов пуста" : "Ничего не найдено")
+                            .font(.headline)
+                        Text(searchText.isEmpty ? "Ваши заказы появятся здесь" : "Попробуйте другой запрос")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            ForEach(filteredOrders) { order in
+                                orderCard(order)
+                            }
+                        }
+                        .padding()
+                    }
+                }
+            }
+            .navigationTitle("История заказов")
+            .navigationBarTitleDisplayMode(.large)
+            .task {
+                await loadOrders()
+            }
+            .onChange(of: searchText) { _, _ in
+                filterOrders()
+            }
+            .onChange(of: selectedFilter) { _, _ in
+                filterOrders()
+            }
+            .refreshable {
+                await loadOrders()
+            }
+            .alert("Повторить заказ?", isPresented: $showReorderConfirmation) {
+                Button("Отмена", role: .cancel) {
+                    selectedOrderForReorder = nil
+                }
+                Button("Повторить") {
+                    if let order = selectedOrderForReorder {
+                        Task {
+                            await reorder(order)
+                        }
+                    }
+                }
+            } message: {
+                if let order = selectedOrderForReorder {
+                    Text("Создать новый заказ из \(order.cafeName) на \(order.paidCredits) Credits?")
+                }
+            }
+        }
+    }
+    
+    // MARK: - Statistics Header
+    
+    private func statisticsHeader(_ stats: OrderStatistics) -> some View {
+        VStack(spacing: 12) {
+            Text("Ваша статистика")
+                .font(.headline)
+            
+            HStack(spacing: 20) {
+                statBox(
+                    value: "\(stats.totalOrders)",
+                    label: "Заказов",
+                    icon: "bag"
+                )
+                
+                statBox(
+                    value: "\(stats.completedOrders)",
+                    label: "Завершено",
+                    icon: "checkmark.circle"
+                )
+                
+                statBox(
+                    value: "\(stats.totalSpentCredits)",
+                    label: "Credits",
+                    icon: "creditcard"
+                )
+            }
+            
+            if let favoriteCafeName = stats.favoriteCafeName {
+                HStack(spacing: 6) {
+                    Image(systemName: "heart.fill")
+                        .foregroundColor(.red)
+                        .font(.caption)
+                    Text("Любимое место:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(favoriteCafeName)
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+    
+    private func statBox(value: String, label: String, icon: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundColor(.blue)
+            Text(value)
+                .font(.title2)
+                .fontWeight(.bold)
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+    
+    // MARK: - Filter Chip
+    
+    private func filterChip(_ filter: OrderStatusFilter) -> some View {
+        Button(action: {
+            selectedFilter = filter
+        }) {
+            Text(filter.rawValue)
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(selectedFilter == filter ? Color.blue : Color.gray.opacity(0.2))
+                .foregroundColor(selectedFilter == filter ? .white : .primary)
+                .clipShape(Capsule())
+        }
+    }
+    
+    // MARK: - Order Card
+    
+    private func orderCard(_ order: OrderHistoryItem) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(order.cafeName)
+                        .font(.headline)
+                    Text(formatDate(order.createdAt))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                statusBadge(order.status)
+            }
+            
+            // Items preview
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(order.items.prefix(3)) { item in
+                    HStack {
+                        Text("\(item.quantity)×")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text(item.title)
+                            .font(.subheadline)
+                        Spacer()
+                        Text("\(item.totalCredits) ₽")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                if order.items.count > 3 {
+                    Text("+ ещё \(order.items.count - 3) позиций")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .italic()
+                }
+            }
+            
+            Divider()
+            
+            // Footer
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Итого")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("\(order.paidCredits) Credits")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                }
+                
+                Spacer()
+                
+                // Reorder button for completed orders
+                if [.issued, .pickedUp].contains(order.status) {
+                    Button(action: {
+                        selectedOrderForReorder = order
+                        showReorderConfirmation = true
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Повторить")
+                        }
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isReordering)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.05))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+        )
+    }
+    
+    private func statusBadge(_ status: OrderStatus) -> some View {
+        Text(status.titleRu)
+            .font(.caption)
+            .fontWeight(.medium)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(statusColor(status).opacity(0.2))
+            .foregroundColor(statusColor(status))
+            .clipShape(Capsule())
+    }
+    
+    private func statusColor(_ status: OrderStatus) -> Color {
+        switch status {
+        case .created, .accepted, .inProgress:
+            return .blue
+        case .ready:
+            return .orange
+        case .issued, .pickedUp:
+            return .green
+        case .rejected, .canceled, .noShow:
+            return .red
+        case .refunded:
+            return .purple
+        }
+    }
+    
+    // MARK: - Data Loading
+    
+    private func loadOrders() async {
+        await MainActor.run {
+            isLoading = true
+            errorMessage = nil
+        }
+        
+        do {
+            async let ordersResult = orderService.fetchOrderHistory(phone: phone, limit: 50, offset: 0)
+            async let statsResult = orderService.fetchOrderStatistics(phone: phone)
+            
+            let (fetchedOrders, fetchedStats) = try await (ordersResult, statsResult)
+            
+            await MainActor.run {
+                self.orders = fetchedOrders
+                self.statistics = fetchedStats
+                self.isLoading = false
+                filterOrders()
+            }
+        } catch {
+            await MainActor.run {
+                self.errorMessage = error.localizedDescription
+                self.isLoading = false
+            }
+            #if DEBUG
+            print("❌ [OrderHistory] Failed to load orders: \(error)")
+            #endif
+        }
+    }
+    
+    private func filterOrders() {
+        var filtered = orders
+        
+        // Apply status filter
+        switch selectedFilter {
+        case .all:
+            break
+        case .active:
+            filtered = filtered.filter { order in
+                [.created, .accepted, .inProgress, .ready].contains(order.status)
+            }
+        case .completed:
+            filtered = filtered.filter { order in
+                [.issued, .pickedUp].contains(order.status)
+            }
+        case .canceled:
+            filtered = filtered.filter { order in
+                [.rejected, .canceled, .refunded, .noShow].contains(order.status)
+            }
+        }
+        
+        // Apply search filter
+        if !searchText.isEmpty {
+            filtered = filtered.filter { order in
+                order.cafeName.localizedCaseInsensitiveContains(searchText) ||
+                order.items.contains { $0.title.localizedCaseInsensitiveContains(searchText) }
+            }
+        }
+        
+        filteredOrders = filtered
+    }
+    
+    private func reorder(_ order: OrderHistoryItem) async {
+        await MainActor.run {
+            isReordering = true
+        }
+        
+        do {
+            let newOrderId = try await orderService.reorderFromExisting(originalOrderId: order.id)
+            
+            await MainActor.run {
+                isReordering = false
+                selectedOrderForReorder = nil
+            }
+            
+            #if DEBUG
+            print("✅ [OrderHistory] Reordered successfully: \(newOrderId)")
+            #endif
+            
+            // Notify parent to navigate to new order
+            onOrderCreated(newOrderId)
+            
+        } catch {
+            await MainActor.run {
+                isReordering = false
+                errorMessage = "Не удалось повторить заказ: \(error.localizedDescription)"
+            }
+            
+            #if DEBUG
+            print("❌ [OrderHistory] Reorder failed: \(error)")
+            #endif
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            formatter.dateFormat = "HH:mm"
+            return "Сегодня в " + formatter.string(from: date)
+        } else if calendar.isDateInYesterday(date) {
+            formatter.dateFormat = "HH:mm"
+            return "Вчера в " + formatter.string(from: date)
+        } else {
+            formatter.dateFormat = "d MMM"
+            let dayStr = formatter.string(from: date)
+            formatter.dateFormat = "HH:mm"
+            return dayStr + " в " + formatter.string(from: date)
+        }
+    }
+}
+
+#Preview {
+    OrderHistoryView(phone: "+79991234567") { orderId in
+        print("Navigate to order: \(orderId)")
+    }
+}

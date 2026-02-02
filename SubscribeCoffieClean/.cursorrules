@@ -1,0 +1,110 @@
+# Cursor Rules для проекта SubscribeCoffieClean
+
+## Контекст проекта
+Это iOS приложение на SwiftUI для подписки на кофе. Проект использует MVVM-подобную архитектуру с ObservableObject stores.
+
+## Стиль кода Swift/SwiftUI
+
+### Общие правила
+- Всегда используй Swift 5.0+ синтаксис
+- Следуй официальным Swift API Design Guidelines
+- Используй `MARK:` комментарии для организации кода:
+  - `// MARK: - Properties`
+  - `// MARK: - Computed Properties`
+  - `// MARK: - Methods`
+  - `// MARK: - Body`
+  - `// MARK: - Private Helpers`
+
+### SwiftUI Best Practices
+
+#### Структура View
+```swift
+struct MyView: View {
+    // MARK: - Properties
+    let data: SomeData
+    @StateObject private var store = SomeStore()
+    @State private var localState: String = ""
+    
+    // MARK: - Computed Properties
+    private var computedValue: Int { ... }
+    
+    // MARK: - Body
+    var body: some View { ... }
+    
+    // MARK: - Private Methods
+    private func helper() { ... }
+}
+```
+
+#### Property Wrappers
+- Используй `@StateObject` для создания и владения ObservableObject
+- Используй `@ObservedObject` для передачи ObservableObject извне
+- Используй `@State` для локального состояния View
+- Используй `@AppStorage` для персистентного хранения простых значений
+- Используй `@EnvironmentObject` для глобального состояния (осторожно)
+
+#### Архитектура
+- Stores (ObservableObject) для бизнес-логики и состояния
+- Views должны быть максимально декларативными
+- Разбивай большие View на приватные подкомпоненты в том же файле
+- Используй отдельные файлы для переиспользуемых компонентов
+
+#### Именование
+- Views: `CafeView`, `CartView`, `ProductDetailView`
+- Stores: `CartStore`, `OrderStore`, `WalletStore`
+- Models: `CartItem`, `Product`, `Order`
+- Components: `TopBarView`, `CafeMenuItemView`
+- Функции: camelCase, глаголы (`handleLogin`, `completeProfile`)
+- Переменные: camelCase, существительные (`selectedCafe`, `isLoading`)
+
+#### UI/UX
+- Используй системные цвета и материалы (`.ultraThinMaterial`)
+- Применяй анимации через `withAnimation`
+- Используй `.buttonStyle(.plain)` для кастомных кнопок
+- Всегда добавляй `.disabled()` для неактивных состояний
+- Используй `.opacity()` для визуальной обратной связи
+
+#### Производительность
+- Используй `LazyVStack`/`LazyHStack` для длинных списков
+- Избегай лишних пересозданий View
+- Используй `@Published` только для необходимых свойств
+- Применяй `id()` для ScrollViewReader когда нужно
+
+### Обработка ошибок
+- Используй `guard let` для опциональных значений
+- Проверяй границы массивов перед доступом
+- Показывай понятные сообщения об ошибках пользователю
+
+### Комментарии
+- Пиши комментарии на русском языке (как в проекте)
+- Объясняй сложную логику
+- Используй `// MARK:` для навигации по коду
+
+### Тестирование
+- Создавай `#Preview` для каждого View
+- Используй моки для тестирования (как `MockCafeService`)
+
+## Работа с проектом
+
+### При добавлении нового функционала
+1. Определи, нужен ли новый Store или можно использовать существующий
+2. Создай модели данных если нужно
+3. Создай View компоненты
+4. Интегрируй в существующую навигацию
+
+### При рефакторинге
+- Сохраняй существующую структуру MARK комментариев
+- Не меняй стиль без необходимости
+- Тестируй изменения в симуляторе
+
+### Файловая структура
+- `Models/` - модели данных и stores
+- `Views/` - основные экраны
+- `Components/` - переиспользуемые UI компоненты
+- `Helpers/` - утилиты и сервисы
+
+## Особенности проекта
+- Используется `internal import Combine` для Combine
+- AppStorage ключи имеют префикс `sc_` (SubscribeCoffie)
+- Моки находятся в `MockCafeService`
+- Навигация через enum `AppScreen` в ContentView

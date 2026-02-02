@@ -1,0 +1,498 @@
+-- Migration: Cafe Networks Management RPC Functions
+-- Description: RPC functions for managing cafe networks (creating, adding/removing cafes)
+-- Date: 2026-02-06
+
+-- ============================================================================
+-- 1. RPC: Create Network
+-- ============================================================================
+
+create or replace function public.create_network(
+  p_name text,
+  p_owner_user_id uuid,
+  p_commission_rate decimal default 4.00
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_id uuid;
+begin
+  -- Check if user is admin or owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role in ('admin', 'owner')
+    )
+  ) then
+    raise exception 'Only admins and cafe owners can create networks';
+  end if;
+  
+  -- Validate name
+  if p_name is null or trim(p_name) = '' then
+    raise exception 'Network name is required';
+  end if;
+  
+  -- Validate commission rate
+  if p_commission_rate < 0 or p_commission_rate > 100 then
+    raise exception 'Commission rate must be between 0 and 100';
+  end if;
+  
+  -- Create network
+  insert into public.wallet_networks (name, owner_user_id, commission_rate)
+  values (trim(p_name), p_owner_user_id, p_commission_rate)
+  returning id into v_network_id;
+  
+  return v_network_id;
+end;
+$$;
+
+comment on function public.create_network is 'Create a new cafe network (admin/owner only)';
+
+-- ============================================================================
+-- 2. RPC: Add Cafe to Network
+-- ============================================================================
+
+create or replace function public.add_cafe_to_network(
+  p_network_id uuid,
+  p_cafe_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_owner uuid;
+begin
+  -- Get network owner
+  select owner_user_id into v_network_owner
+  from public.wallet_networks
+  where id = p_network_id;
+  
+  if v_network_owner is null then
+    raise exception 'Network not found';
+  end if;
+  
+  -- Check if user is admin or network owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or auth.uid() = v_network_owner
+  ) then
+    raise exception 'Only admins and network owners can add cafes to network';
+  end if;
+  
+  -- Check if cafe exists
+  if not exists (select 1 from public.cafes where id = p_cafe_id) then
+    raise exception 'Cafe not found';
+  end if;
+  
+  -- Check if cafe is already in network
+  if exists (
+    select 1 from public.cafe_network_members
+    where network_id = p_network_id and cafe_id = p_cafe_id
+  ) then
+    raise exception 'Cafe is already in this network';
+  end if;
+  
+  -- Add cafe to network
+  insert into public.cafe_network_members (network_id, cafe_id)
+  values (p_network_id, p_cafe_id);
+  
+  return true;
+end;
+$$;
+
+comment on function public.add_cafe_to_network is 'Add a cafe to a network (admin/owner only)';
+
+-- ============================================================================
+-- 3. RPC: Remove Cafe from Network
+-- ============================================================================
+
+create or replace function public.remove_cafe_from_network(
+  p_network_id uuid,
+  p_cafe_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_owner uuid;
+begin
+  -- Get network owner
+  select owner_user_id into v_network_owner
+  from public.wallet_networks
+  where id = p_network_id;
+  
+  if v_network_owner is null then
+    raise exception 'Network not found';
+  end if;
+  
+  -- Check if user is admin or network owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or auth.uid() = v_network_owner
+  ) then
+    raise exception 'Only admins and network owners can remove cafes from network';
+  end if;
+  
+  -- Remove cafe from network
+  delete from public.cafe_network_members
+  where network_id = p_network_id and cafe_id = p_cafe_id;
+  
+  if not found then
+    raise exception 'Cafe is not in this network';
+  end if;
+  
+  return true;
+end;
+$$;
+
+comment on function public.remove_cafe_from_network is 'Remove a cafe from a network (admin/owner only)';
+
+-- ============================================================================
+-- 4. RPC: Get Network Cafes
+-- ============================================================================
+
+create or replace function public.get_network_cafes(p_network_id uuid)
+returns table(
+  cafe_id uuid,
+  cafe_name text,
+  cafe_address text,
+  cafe_mode text,
+  joined_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if network exists
+  if not exists (select 1 from public.wallet_networks where id = p_network_id) then
+    raise exception 'Network not found';
+  end if;
+  
+  return query
+  select
+    c.id as cafe_id,
+    c.name as cafe_name,
+    c.address as cafe_address,
+    c.mode::text as cafe_mode,
+    cnm.joined_at
+  from public.cafe_network_members cnm
+  inner join public.cafes c on c.id = cnm.cafe_id
+  where cnm.network_id = p_network_id
+  order by cnm.joined_at desc;
+end;
+$$;
+
+comment on function public.get_network_cafes is 'Get all cafes in a network';
+
+-- ============================================================================
+-- 5. RPC: Get Cafe Network
+-- ============================================================================
+
+create or replace function public.get_cafe_network(p_cafe_id uuid)
+returns table(
+  network_id uuid,
+  network_name text,
+  commission_rate decimal,
+  cafe_count bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select
+    wn.id as network_id,
+    wn.name as network_name,
+    wn.commission_rate,
+    (
+      select count(*)
+      from public.cafe_network_members
+      where network_id = wn.id
+    ) as cafe_count
+  from public.cafe_network_members cnm
+  inner join public.wallet_networks wn on wn.id = cnm.network_id
+  where cnm.cafe_id = p_cafe_id
+  limit 1;
+end;
+$$;
+
+comment on function public.get_cafe_network is 'Get the network a cafe belongs to (if any)';
+
+-- ============================================================================
+-- 6. RPC: Get All Networks
+-- ============================================================================
+
+create or replace function public.get_all_networks(
+  p_limit int default 50,
+  p_offset int default 0
+)
+returns table(
+  network_id uuid,
+  network_name text,
+  owner_user_id uuid,
+  owner_email text,
+  commission_rate decimal,
+  cafe_count bigint,
+  created_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can view all networks';
+  end if;
+  
+  return query
+  select
+    wn.id as network_id,
+    wn.name as network_name,
+    wn.owner_user_id,
+    p.email as owner_email,
+    wn.commission_rate,
+    (
+      select count(*)
+      from public.cafe_network_members
+      where network_id = wn.id
+    ) as cafe_count,
+    wn.created_at
+  from public.wallet_networks wn
+  left join public.profiles p on p.id = wn.owner_user_id
+  order by wn.created_at desc
+  limit p_limit
+  offset p_offset;
+end;
+$$;
+
+comment on function public.get_all_networks is 'Get all networks with cafe counts (admin only)';
+
+-- ============================================================================
+-- 7. RPC: Get Network Details
+-- ============================================================================
+
+create or replace function public.get_network_details(p_network_id uuid)
+returns table(
+  network_id uuid,
+  network_name text,
+  owner_user_id uuid,
+  owner_email text,
+  commission_rate decimal,
+  cafe_count bigint,
+  total_wallets bigint,
+  created_at timestamp with time zone,
+  updated_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_owner uuid;
+begin
+  -- Get network owner
+  select owner_user_id into v_network_owner
+  from public.wallet_networks
+  where id = p_network_id;
+  
+  if v_network_owner is null then
+    raise exception 'Network not found';
+  end if;
+  
+  -- Check if user is admin or network owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or auth.uid() = v_network_owner
+  ) then
+    raise exception 'Only admins and network owners can view network details';
+  end if;
+  
+  return query
+  select
+    wn.id as network_id,
+    wn.name as network_name,
+    wn.owner_user_id,
+    p.email as owner_email,
+    wn.commission_rate,
+    (
+      select count(*)
+      from public.cafe_network_members
+      where network_id = wn.id
+    ) as cafe_count,
+    (
+      select count(*)
+      from public.wallets
+      where network_id = wn.id
+    ) as total_wallets,
+    wn.created_at,
+    wn.updated_at
+  from public.wallet_networks wn
+  left join public.profiles p on p.id = wn.owner_user_id
+  where wn.id = p_network_id;
+end;
+$$;
+
+comment on function public.get_network_details is 'Get detailed information about a network (admin/owner only)';
+
+-- ============================================================================
+-- 8. RPC: Update Network
+-- ============================================================================
+
+create or replace function public.update_network(
+  p_network_id uuid,
+  p_name text default null,
+  p_commission_rate decimal default null
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_owner uuid;
+begin
+  -- Get network owner
+  select owner_user_id into v_network_owner
+  from public.wallet_networks
+  where id = p_network_id;
+  
+  if v_network_owner is null then
+    raise exception 'Network not found';
+  end if;
+  
+  -- Check if user is admin or network owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or auth.uid() = v_network_owner
+  ) then
+    raise exception 'Only admins and network owners can update network';
+  end if;
+  
+  -- Validate commission rate if provided
+  if p_commission_rate is not null and (p_commission_rate < 0 or p_commission_rate > 100) then
+    raise exception 'Commission rate must be between 0 and 100';
+  end if;
+  
+  -- Update network
+  update public.wallet_networks
+  set
+    name = coalesce(trim(p_name), name),
+    commission_rate = coalesce(p_commission_rate, commission_rate),
+    updated_at = now()
+  where id = p_network_id;
+  
+  return true;
+end;
+$$;
+
+comment on function public.update_network is 'Update network name and/or commission rate (admin/owner only)';
+
+-- ============================================================================
+-- 9. RPC: Delete Network
+-- ============================================================================
+
+create or replace function public.delete_network(p_network_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_network_owner uuid;
+  v_wallet_count int;
+begin
+  -- Get network owner
+  select owner_user_id into v_network_owner
+  from public.wallet_networks
+  where id = p_network_id;
+  
+  if v_network_owner is null then
+    raise exception 'Network not found';
+  end if;
+  
+  -- Check if user is admin or network owner
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or auth.uid() = v_network_owner
+  ) then
+    raise exception 'Only admins and network owners can delete network';
+  end if;
+  
+  -- Check if there are wallets tied to this network
+  select count(*) into v_wallet_count
+  from public.wallets
+  where network_id = p_network_id;
+  
+  if v_wallet_count > 0 then
+    raise exception 'Cannot delete network with active wallets. Found % wallet(s).', v_wallet_count;
+  end if;
+  
+  -- Delete network (cascade will remove cafe_network_members)
+  delete from public.wallet_networks
+  where id = p_network_id;
+  
+  return true;
+end;
+$$;
+
+comment on function public.delete_network is 'Delete a network (only if no wallets are tied to it)';
+
+-- ============================================================================
+-- 10. RPC: Get Available Cafes for Network
+-- ============================================================================
+
+create or replace function public.get_available_cafes_for_network(p_network_id uuid default null)
+returns table(
+  cafe_id uuid,
+  cafe_name text,
+  cafe_address text,
+  cafe_mode text,
+  already_in_network boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select
+    c.id as cafe_id,
+    c.name as cafe_name,
+    c.address as cafe_address,
+    c.mode::text as cafe_mode,
+    case
+      when p_network_id is not null then
+        exists (
+          select 1 from public.cafe_network_members
+          where network_id = p_network_id and cafe_id = c.id
+        )
+      else false
+    end as already_in_network
+  from public.cafes c
+  order by c.name;
+end;
+$$;
+
+comment on function public.get_available_cafes_for_network is 'Get all cafes with their network membership status';

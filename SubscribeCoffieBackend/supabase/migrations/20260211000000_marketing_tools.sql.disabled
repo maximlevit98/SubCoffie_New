@@ -1,0 +1,728 @@
+-- Marketing Tools: Promo Codes, Campaigns, Push Notifications
+-- Migration: 20260211000000_marketing_tools.sql
+
+-- ==============================================
+-- 1. PROMO CODES TABLE
+-- ==============================================
+CREATE TABLE IF NOT EXISTS public.promo_codes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code TEXT NOT NULL UNIQUE,
+    description TEXT,
+    
+    -- Discount configuration
+    discount_type TEXT NOT NULL CHECK (discount_type IN ('percentage', 'fixed_amount', 'free_item')),
+    discount_value DECIMAL(10, 2) NOT NULL CHECK (discount_value >= 0),
+    
+    -- Restrictions
+    min_order_amount DECIMAL(10, 2) DEFAULT 0,
+    max_discount_amount DECIMAL(10, 2), -- Cap for percentage discounts
+    max_uses INTEGER, -- NULL = unlimited
+    max_uses_per_user INTEGER DEFAULT 1,
+    uses_count INTEGER DEFAULT 0,
+    
+    -- Validity
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_until TIMESTAMPTZ,
+    
+    -- Targeting (optional filters)
+    applicable_cafe_ids UUID[], -- NULL = all cafes
+    applicable_menu_item_ids UUID[], -- NULL = all items
+    min_loyalty_level TEXT, -- Require certain loyalty level
+    
+    -- Status
+    active BOOLEAN DEFAULT true,
+    
+    -- Metadata
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_promo_codes_code ON public.promo_codes(code) WHERE active = true;
+CREATE INDEX idx_promo_codes_validity ON public.promo_codes(valid_from, valid_until) WHERE active = true;
+CREATE INDEX idx_promo_codes_created_by ON public.promo_codes(created_by);
+
+-- RLS
+ALTER TABLE public.promo_codes ENABLE ROW LEVEL SECURITY;
+
+-- Users can view active promo codes
+CREATE POLICY "Users can view active promo codes"
+    ON public.promo_codes FOR SELECT
+    USING (active = true AND (valid_until IS NULL OR valid_until > NOW()));
+
+-- Admins can manage all promo codes
+CREATE POLICY "Admins can manage promo codes"
+    ON public.promo_codes FOR ALL
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.profiles
+            WHERE profiles.user_id = auth.uid()
+            AND profiles.role IN ('admin', 'super_admin')
+        )
+    );
+
+-- ==============================================
+-- 2. PROMO USAGE TABLE
+-- ==============================================
+CREATE TABLE IF NOT EXISTS public.promo_usage (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    promo_code_id UUID NOT NULL REFERENCES public.promo_codes(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    order_id UUID REFERENCES public.orders(id) ON DELETE SET NULL,
+    
+    discount_applied DECIMAL(10, 2) NOT NULL,
+    original_amount DECIMAL(10, 2) NOT NULL,
+    final_amount DECIMAL(10, 2) NOT NULL,
+    
+    used_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    UNIQUE(promo_code_id, order_id)
+);
+
+-- Indexes
+CREATE INDEX idx_promo_usage_user ON public.promo_usage(user_id);
+CREATE INDEX idx_promo_usage_promo_code ON public.promo_usage(promo_code_id);
+CREATE INDEX idx_promo_usage_order ON public.promo_usage(order_id);
+CREATE INDEX idx_promo_usage_used_at ON public.promo_usage(used_at);
+
+-- RLS
+ALTER TABLE public.promo_usage ENABLE ROW LEVEL SECURITY;
+
+-- Users can view their own usage
+CREATE POLICY "Users can view own promo usage"
+    ON public.promo_usage FOR SELECT
+    USING (user_id = auth.uid());
+
+-- System can insert usage records
+CREATE POLICY "Authenticated users can create promo usage"
+    ON public.promo_usage FOR INSERT
+    WITH CHECK (user_id = auth.uid());
+
+-- Admins can view all usage
+CREATE POLICY "Admins can view all promo usage"
+    ON public.promo_usage FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.profiles
+            WHERE profiles.user_id = auth.uid()
+            AND profiles.role IN ('admin', 'super_admin')
+        )
+    );
+
+-- ==============================================
+-- 3. MARKETING CAMPAIGNS TABLE
+-- ==============================================
+CREATE TABLE IF NOT EXISTS public.campaigns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    description TEXT,
+    
+    campaign_type TEXT NOT NULL CHECK (campaign_type IN ('promo', 'push_notification', 'email', 'banner', 'loyalty')),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'scheduled', 'active', 'paused', 'completed', 'cancelled')),
+    
+    -- Scheduling
+    start_date TIMESTAMPTZ,
+    end_date TIMESTAMPTZ,
+    
+    -- Targeting
+    target_segment JSONB, -- e.g., {"user_type": "new", "min_orders": 0, "max_orders": 0}
+    
+    -- Related resources
+    promo_code_id UUID REFERENCES public.promo_codes(id),
+    
+    -- Metrics
+    impressions_count INTEGER DEFAULT 0,
+    clicks_count INTEGER DEFAULT 0,
+    conversions_count INTEGER DEFAULT 0,
+    
+    -- Metadata
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_campaigns_status ON public.campaigns(status);
+CREATE INDEX idx_campaigns_type ON public.campaigns(campaign_type);
+CREATE INDEX idx_campaigns_dates ON public.campaigns(start_date, end_date);
+CREATE INDEX idx_campaigns_created_by ON public.campaigns(created_by);
+
+-- RLS
+ALTER TABLE public.campaigns ENABLE ROW LEVEL SECURITY;
+
+-- Users can view active campaigns
+CREATE POLICY "Users can view active campaigns"
+    ON public.campaigns FOR SELECT
+    USING (status = 'active' AND (start_date IS NULL OR start_date <= NOW()) AND (end_date IS NULL OR end_date > NOW()));
+
+-- Admins can manage campaigns
+CREATE POLICY "Admins can manage campaigns"
+    ON public.campaigns FOR ALL
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.profiles
+            WHERE profiles.user_id = auth.uid()
+            AND profiles.role IN ('admin', 'super_admin')
+        )
+    );
+
+-- ==============================================
+-- 4. PUSH CAMPAIGNS TABLE
+-- ==============================================
+CREATE TABLE IF NOT EXISTS public.push_campaigns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID REFERENCES public.campaigns(id) ON DELETE CASCADE,
+    
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    
+    -- Targeting
+    target_segment TEXT CHECK (target_segment IN ('all', 'new_users', 'active_users', 'dormant_users', 'vip_users', 'custom')),
+    custom_segment_filter JSONB, -- For custom targeting
+    
+    -- Deep linking
+    action_type TEXT CHECK (action_type IN ('open_app', 'open_cafe', 'open_promo', 'open_order')),
+    action_data JSONB, -- e.g., {"cafe_id": "uuid"} or {"promo_code": "SUMMER2026"}
+    
+    -- Scheduling
+    scheduled_at TIMESTAMPTZ,
+    sent_at TIMESTAMPTZ,
+    
+    -- Metrics
+    recipients_count INTEGER DEFAULT 0,
+    delivered_count INTEGER DEFAULT 0,
+    opened_count INTEGER DEFAULT 0,
+    clicked_count INTEGER DEFAULT 0,
+    
+    -- Status
+    status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'scheduled', 'sending', 'sent', 'failed')),
+    
+    -- Metadata
+    created_by UUID REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_push_campaigns_status ON public.push_campaigns(status);
+CREATE INDEX idx_push_campaigns_scheduled ON public.push_campaigns(scheduled_at);
+CREATE INDEX idx_push_campaigns_campaign_id ON public.push_campaigns(campaign_id);
+
+-- RLS
+ALTER TABLE public.push_campaigns ENABLE ROW LEVEL SECURITY;
+
+-- Admins only
+CREATE POLICY "Admins can manage push campaigns"
+    ON public.push_campaigns FOR ALL
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.profiles
+            WHERE profiles.user_id = auth.uid()
+            AND profiles.role IN ('admin', 'super_admin')
+        )
+    );
+
+-- ==============================================
+-- 5. RPC FUNCTIONS
+-- ==============================================
+
+-- Function: Validate Promo Code
+CREATE OR REPLACE FUNCTION public.validate_promo_code(
+    p_code TEXT,
+    p_user_id UUID,
+    p_order_amount DECIMAL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_promo public.promo_codes%ROWTYPE;
+    v_user_usage_count INTEGER;
+    v_discount_amount DECIMAL;
+    v_final_amount DECIMAL;
+    v_error TEXT;
+BEGIN
+    -- Find promo code
+    SELECT * INTO v_promo
+    FROM public.promo_codes
+    WHERE code = UPPER(p_code)
+    AND active = true;
+    
+    -- Check if promo exists
+    IF v_promo.id IS NULL THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', 'Promo code not found or inactive'
+        );
+    END IF;
+    
+    -- Check validity dates
+    IF v_promo.valid_from > NOW() THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', 'Promo code not yet active'
+        );
+    END IF;
+    
+    IF v_promo.valid_until IS NOT NULL AND v_promo.valid_until < NOW() THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', 'Promo code has expired'
+        );
+    END IF;
+    
+    -- Check max uses
+    IF v_promo.max_uses IS NOT NULL AND v_promo.uses_count >= v_promo.max_uses THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', 'Promo code has reached maximum uses'
+        );
+    END IF;
+    
+    -- Check max uses per user
+    SELECT COUNT(*) INTO v_user_usage_count
+    FROM public.promo_usage
+    WHERE promo_code_id = v_promo.id
+    AND user_id = p_user_id;
+    
+    IF v_promo.max_uses_per_user IS NOT NULL AND v_user_usage_count >= v_promo.max_uses_per_user THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', 'You have already used this promo code the maximum number of times'
+        );
+    END IF;
+    
+    -- Check minimum order amount
+    IF p_order_amount < v_promo.min_order_amount THEN
+        RETURN jsonb_build_object(
+            'valid', false,
+            'error', format('Minimum order amount is %s credits', v_promo.min_order_amount)
+        );
+    END IF;
+    
+    -- Calculate discount
+    IF v_promo.discount_type = 'percentage' THEN
+        v_discount_amount := p_order_amount * (v_promo.discount_value / 100);
+        -- Apply max discount cap if set
+        IF v_promo.max_discount_amount IS NOT NULL AND v_discount_amount > v_promo.max_discount_amount THEN
+            v_discount_amount := v_promo.max_discount_amount;
+        END IF;
+    ELSIF v_promo.discount_type = 'fixed_amount' THEN
+        v_discount_amount := v_promo.discount_value;
+        -- Discount cannot exceed order amount
+        IF v_discount_amount > p_order_amount THEN
+            v_discount_amount := p_order_amount;
+        END IF;
+    ELSE
+        v_discount_amount := 0; -- For 'free_item' type, handle separately
+    END IF;
+    
+    v_final_amount := GREATEST(p_order_amount - v_discount_amount, 0);
+    
+    -- Return success
+    RETURN jsonb_build_object(
+        'valid', true,
+        'promo_id', v_promo.id,
+        'code', v_promo.code,
+        'description', v_promo.description,
+        'discount_type', v_promo.discount_type,
+        'discount_value', v_promo.discount_value,
+        'discount_amount', v_discount_amount,
+        'original_amount', p_order_amount,
+        'final_amount', v_final_amount,
+        'savings', v_discount_amount
+    );
+END;
+$$;
+
+-- Function: Apply Promo Code to Order
+CREATE OR REPLACE FUNCTION public.apply_promo_code(
+    p_order_id UUID,
+    p_promo_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_order public.orders%ROWTYPE;
+    v_promo public.promo_codes%ROWTYPE;
+    v_validation JSONB;
+    v_usage_id UUID;
+BEGIN
+    -- Get order
+    SELECT * INTO v_order
+    FROM public.orders
+    WHERE id = p_order_id;
+    
+    IF v_order.id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Order not found');
+    END IF;
+    
+    -- Check if order already has a promo code applied
+    IF EXISTS (SELECT 1 FROM public.promo_usage WHERE order_id = p_order_id) THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Order already has a promo code applied');
+    END IF;
+    
+    -- Get promo
+    SELECT * INTO v_promo
+    FROM public.promo_codes
+    WHERE id = p_promo_id;
+    
+    IF v_promo.id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Promo code not found');
+    END IF;
+    
+    -- Validate promo
+    v_validation := public.validate_promo_code(
+        v_promo.code,
+        v_order.user_id,
+        v_order.total_credits
+    );
+    
+    IF NOT (v_validation->>'valid')::BOOLEAN THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', v_validation->>'error'
+        );
+    END IF;
+    
+    -- Create usage record
+    INSERT INTO public.promo_usage (
+        promo_code_id,
+        user_id,
+        order_id,
+        discount_applied,
+        original_amount,
+        final_amount
+    ) VALUES (
+        p_promo_id,
+        v_order.user_id,
+        p_order_id,
+        (v_validation->>'discount_amount')::DECIMAL,
+        (v_validation->>'original_amount')::DECIMAL,
+        (v_validation->>'final_amount')::DECIMAL
+    )
+    RETURNING id INTO v_usage_id;
+    
+    -- Increment promo code usage count
+    UPDATE public.promo_codes
+    SET uses_count = uses_count + 1,
+        updated_at = NOW()
+    WHERE id = p_promo_id;
+    
+    -- Update order total (if applicable)
+    -- Note: Depending on your order flow, you might update the order here or handle it separately
+    UPDATE public.orders
+    SET total_credits = (v_validation->>'final_amount')::DECIMAL,
+        updated_at = NOW()
+    WHERE id = p_order_id;
+    
+    -- Return success
+    RETURN jsonb_build_object(
+        'success', true,
+        'usage_id', v_usage_id,
+        'discount_applied', (v_validation->>'discount_amount')::DECIMAL,
+        'final_amount', (v_validation->>'final_amount')::DECIMAL
+    );
+END;
+$$;
+
+-- Function: Get User's Eligible Promo Codes
+CREATE OR REPLACE FUNCTION public.get_eligible_promo_codes(
+    p_user_id UUID,
+    p_cafe_id UUID DEFAULT NULL,
+    p_order_amount DECIMAL DEFAULT 0
+)
+RETURNS TABLE (
+    id UUID,
+    code TEXT,
+    description TEXT,
+    discount_type TEXT,
+    discount_value DECIMAL,
+    min_order_amount DECIMAL,
+    valid_until TIMESTAMPTZ,
+    estimated_discount DECIMAL
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        pc.id,
+        pc.code,
+        pc.description,
+        pc.discount_type,
+        pc.discount_value,
+        pc.min_order_amount,
+        pc.valid_until,
+        CASE 
+            WHEN pc.discount_type = 'percentage' THEN 
+                LEAST(
+                    p_order_amount * (pc.discount_value / 100),
+                    COALESCE(pc.max_discount_amount, p_order_amount)
+                )
+            WHEN pc.discount_type = 'fixed_amount' THEN 
+                LEAST(pc.discount_value, p_order_amount)
+            ELSE 0
+        END as estimated_discount
+    FROM public.promo_codes pc
+    WHERE pc.active = true
+    AND pc.valid_from <= NOW()
+    AND (pc.valid_until IS NULL OR pc.valid_until > NOW())
+    AND (pc.max_uses IS NULL OR pc.uses_count < pc.max_uses)
+    AND p_order_amount >= pc.min_order_amount
+    AND (pc.applicable_cafe_ids IS NULL OR p_cafe_id = ANY(pc.applicable_cafe_ids))
+    AND (
+        pc.max_uses_per_user IS NULL 
+        OR (
+            SELECT COUNT(*) 
+            FROM public.promo_usage pu 
+            WHERE pu.promo_code_id = pc.id 
+            AND pu.user_id = p_user_id
+        ) < pc.max_uses_per_user
+    )
+    ORDER BY estimated_discount DESC;
+END;
+$$;
+
+-- Function: Send Push Campaign (Placeholder for future implementation)
+CREATE OR REPLACE FUNCTION public.send_push_campaign(
+    p_campaign_id UUID,
+    p_user_segment TEXT DEFAULT 'all'
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_push public.push_campaigns%ROWTYPE;
+    v_target_users UUID[];
+    v_recipients_count INTEGER;
+BEGIN
+    -- Check admin permission
+    IF NOT EXISTS (
+        SELECT 1 FROM public.profiles
+        WHERE user_id = auth.uid()
+        AND role IN ('admin', 'super_admin')
+    ) THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Unauthorized');
+    END IF;
+    
+    -- Get push campaign
+    SELECT * INTO v_push
+    FROM public.push_campaigns
+    WHERE id = p_campaign_id;
+    
+    IF v_push.id IS NULL THEN
+        RETURN jsonb_build_object('success', false, 'error', 'Push campaign not found');
+    END IF;
+    
+    -- Get target users based on segment
+    IF p_user_segment = 'all' THEN
+        SELECT ARRAY_AGG(user_id) INTO v_target_users
+        FROM public.profiles;
+    ELSIF p_user_segment = 'new_users' THEN
+        SELECT ARRAY_AGG(user_id) INTO v_target_users
+        FROM public.profiles
+        WHERE created_at > NOW() - INTERVAL '30 days';
+    ELSIF p_user_segment = 'active_users' THEN
+        SELECT ARRAY_AGG(DISTINCT user_id) INTO v_target_users
+        FROM public.orders
+        WHERE created_at > NOW() - INTERVAL '7 days';
+    ELSIF p_user_segment = 'dormant_users' THEN
+        SELECT ARRAY_AGG(user_id) INTO v_target_users
+        FROM public.profiles p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.orders o
+            WHERE o.user_id = p.user_id
+            AND o.created_at > NOW() - INTERVAL '30 days'
+        )
+        AND EXISTS (
+            SELECT 1 FROM public.orders o
+            WHERE o.user_id = p.user_id
+        );
+    ELSE
+        v_target_users := ARRAY[]::UUID[];
+    END IF;
+    
+    v_recipients_count := COALESCE(array_length(v_target_users, 1), 0);
+    
+    -- Update push campaign
+    UPDATE public.push_campaigns
+    SET status = 'sending',
+        sent_at = NOW(),
+        recipients_count = v_recipients_count
+    WHERE id = p_campaign_id;
+    
+    -- TODO: Integrate with actual push notification service (Firebase, OneSignal, etc.)
+    -- For now, this is a placeholder that marks the campaign as sent
+    
+    UPDATE public.push_campaigns
+    SET status = 'sent'
+    WHERE id = p_campaign_id;
+    
+    RETURN jsonb_build_object(
+        'success', true,
+        'campaign_id', p_campaign_id,
+        'recipients_count', v_recipients_count,
+        'message', 'Push campaign scheduled/sent'
+    );
+END;
+$$;
+
+-- Function: Get Campaign Analytics
+CREATE OR REPLACE FUNCTION public.get_campaign_analytics(
+    p_campaign_id UUID DEFAULT NULL,
+    p_start_date TIMESTAMPTZ DEFAULT NOW() - INTERVAL '30 days',
+    p_end_date TIMESTAMPTZ DEFAULT NOW()
+)
+RETURNS TABLE (
+    campaign_id UUID,
+    campaign_name TEXT,
+    campaign_type TEXT,
+    promo_code TEXT,
+    impressions INTEGER,
+    clicks INTEGER,
+    conversions INTEGER,
+    revenue_generated DECIMAL,
+    discount_given DECIMAL,
+    roi DECIMAL
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        c.id as campaign_id,
+        c.name as campaign_name,
+        c.campaign_type,
+        pc.code as promo_code,
+        c.impressions_count as impressions,
+        c.clicks_count as clicks,
+        c.conversions_count as conversions,
+        COALESCE(SUM(pu.final_amount), 0) as revenue_generated,
+        COALESCE(SUM(pu.discount_applied), 0) as discount_given,
+        CASE 
+            WHEN COALESCE(SUM(pu.discount_applied), 0) > 0 
+            THEN COALESCE(SUM(pu.final_amount), 0) / COALESCE(SUM(pu.discount_applied), 1)
+            ELSE 0
+        END as roi
+    FROM public.campaigns c
+    LEFT JOIN public.promo_codes pc ON c.promo_code_id = pc.id
+    LEFT JOIN public.promo_usage pu ON pu.promo_code_id = pc.id
+    WHERE (p_campaign_id IS NULL OR c.id = p_campaign_id)
+    AND c.created_at BETWEEN p_start_date AND p_end_date
+    GROUP BY c.id, c.name, c.campaign_type, pc.code, c.impressions_count, c.clicks_count, c.conversions_count;
+END;
+$$;
+
+-- ==============================================
+-- 6. TRIGGERS
+-- ==============================================
+
+-- Trigger: Update promo_codes updated_at
+CREATE OR REPLACE FUNCTION public.update_promo_codes_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_update_promo_codes_updated_at
+    BEFORE UPDATE ON public.promo_codes
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_promo_codes_updated_at();
+
+-- Trigger: Update campaigns updated_at
+CREATE OR REPLACE FUNCTION public.update_campaigns_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_update_campaigns_updated_at
+    BEFORE UPDATE ON public.campaigns
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_campaigns_updated_at();
+
+-- ==============================================
+-- 7. VIEWS
+-- ==============================================
+
+-- View: Active Promo Codes Summary
+CREATE OR REPLACE VIEW public.active_promo_codes_summary AS
+SELECT 
+    pc.id,
+    pc.code,
+    pc.description,
+    pc.discount_type,
+    pc.discount_value,
+    pc.min_order_amount,
+    pc.max_uses,
+    pc.uses_count,
+    pc.valid_from,
+    pc.valid_until,
+    COUNT(pu.id) as total_uses,
+    COALESCE(SUM(pu.discount_applied), 0) as total_discount_given,
+    COALESCE(SUM(pu.final_amount), 0) as total_revenue_with_promo
+FROM public.promo_codes pc
+LEFT JOIN public.promo_usage pu ON pc.id = pu.promo_code_id
+WHERE pc.active = true
+AND pc.valid_from <= NOW()
+AND (pc.valid_until IS NULL OR pc.valid_until > NOW())
+GROUP BY pc.id;
+
+-- View: Campaign Performance
+CREATE OR REPLACE VIEW public.campaign_performance AS
+SELECT 
+    c.id,
+    c.name,
+    c.campaign_type,
+    c.status,
+    c.start_date,
+    c.end_date,
+    c.impressions_count,
+    c.clicks_count,
+    c.conversions_count,
+    CASE 
+        WHEN c.impressions_count > 0 
+        THEN (c.clicks_count::DECIMAL / c.impressions_count * 100)
+        ELSE 0 
+    END as ctr_percentage,
+    CASE 
+        WHEN c.clicks_count > 0 
+        THEN (c.conversions_count::DECIMAL / c.clicks_count * 100)
+        ELSE 0 
+    END as conversion_rate,
+    pc.code as promo_code,
+    pc.uses_count as promo_uses,
+    c.created_at
+FROM public.campaigns c
+LEFT JOIN public.promo_codes pc ON c.promo_code_id = pc.id
+ORDER BY c.created_at DESC;
+
+-- ==============================================
+-- COMMENTS
+-- ==============================================
+
+COMMENT ON TABLE public.promo_codes IS 'Marketing promo codes for discounts and special offers';
+COMMENT ON TABLE public.promo_usage IS 'Tracks promo code usage by users and orders';
+COMMENT ON TABLE public.campaigns IS 'Marketing campaigns for promotions and user engagement';
+COMMENT ON TABLE public.push_campaigns IS 'Push notification campaigns with targeting and analytics';
+
+COMMENT ON FUNCTION public.validate_promo_code IS 'Validates a promo code for a user and order amount';
+COMMENT ON FUNCTION public.apply_promo_code IS 'Applies a validated promo code to an order';
+COMMENT ON FUNCTION public.get_eligible_promo_codes IS 'Returns promo codes eligible for a user and order';
+COMMENT ON FUNCTION public.send_push_campaign IS 'Sends a push notification campaign to target segment';
+COMMENT ON FUNCTION public.get_campaign_analytics IS 'Returns analytics data for campaigns';

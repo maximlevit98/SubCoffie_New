@@ -1,0 +1,221 @@
+# Fastfile for SubscribeCoffieClean iOS App
+
+default_platform(:ios)
+
+platform :ios do
+  # Variables
+  scheme = "SubscribeCoffieClean"
+  workspace = "SubscribeCoffieClean/SubscribeCoffieClean.xcodeproj/project.xcworkspace"
+  
+  # MARK: - Testing
+  
+  desc "Run all unit tests"
+  lane :test do
+    run_tests(
+      workspace: workspace,
+      scheme: scheme,
+      devices: ["iPhone 15 Pro"],
+      clean: true,
+      code_coverage: true,
+      output_types: "html,junit",
+      output_directory: "./fastlane/test_output"
+    )
+  end
+  
+  desc "Run unit tests only"
+  lane :test_unit do
+    run_tests(
+      workspace: workspace,
+      scheme: scheme,
+      devices: ["iPhone 15 Pro"],
+      only_testing: ["SubscribeCoffieCleanTests"],
+      clean: true,
+      code_coverage: true
+    )
+  end
+  
+  desc "Run UI tests only"
+  lane :test_ui do
+    run_tests(
+      workspace: workspace,
+      scheme: scheme,
+      devices: ["iPhone 15 Pro"],
+      only_testing: ["SubscribeCoffieCleanUITests"],
+      clean: true
+    )
+  end
+  
+  desc "Run tests on multiple devices"
+  lane :test_multi_device do
+    run_tests(
+      workspace: workspace,
+      scheme: scheme,
+      devices: ["iPhone 15 Pro", "iPhone 15", "iPad Pro (12.9-inch) (6th generation)"],
+      clean: true,
+      code_coverage: true
+    )
+  end
+  
+  # MARK: - Code Quality
+  
+  desc "Run SwiftLint"
+  lane :lint do
+    swiftlint(
+      mode: :lint,
+      executable: "swiftlint",
+      config_file: ".swiftlint.yml",
+      raise_if_swiftlint_error: true,
+      ignore_exit_status: false
+    )
+  end
+  
+  desc "Auto-fix SwiftLint warnings"
+  lane :lint_fix do
+    swiftlint(
+      mode: :fix,
+      executable: "swiftlint"
+    )
+  end
+  
+  # MARK: - Building
+  
+  desc "Build for testing"
+  lane :build_for_testing do
+    build_app(
+      workspace: workspace,
+      scheme: scheme,
+      configuration: "Debug",
+      skip_package_ipa: true,
+      skip_archive: true,
+      build_path: "./build",
+      derived_data_path: "./derived_data"
+    )
+  end
+  
+  desc "Build release version"
+  lane :build_release do
+    build_app(
+      workspace: workspace,
+      scheme: scheme,
+      configuration: "Release",
+      export_method: "ad-hoc",
+      output_directory: "./build",
+      output_name: "SubscribeCoffieClean.ipa"
+    )
+  end
+  
+  # MARK: - Beta Distribution
+  
+  desc "Upload to TestFlight"
+  lane :beta do
+    # Increment build number
+    increment_build_number(
+      xcodeproj: "SubscribeCoffieClean/SubscribeCoffieClean.xcodeproj"
+    )
+    
+    # Build the app
+    build_app(
+      workspace: workspace,
+      scheme: scheme,
+      configuration: "Release",
+      export_method: "app-store"
+    )
+    
+    # Upload to TestFlight
+    upload_to_testflight(
+      skip_waiting_for_build_processing: true
+    )
+    
+    # Send notification (optional)
+    # slack(message: "New beta version uploaded to TestFlight!")
+  end
+  
+  # MARK: - Release
+  
+  desc "Deploy to App Store"
+  lane :release do
+    # Increment version
+    increment_version_number(
+      xcodeproj: "SubscribeCoffieClean/SubscribeCoffieClean.xcodeproj"
+    )
+    
+    # Build the app
+    build_app(
+      workspace: workspace,
+      scheme: scheme,
+      configuration: "Release",
+      export_method: "app-store"
+    )
+    
+    # Upload to App Store
+    upload_to_app_store(
+      force: true,
+      skip_metadata: false,
+      skip_screenshots: false,
+      submit_for_review: false
+    )
+  end
+  
+  # MARK: - Development
+  
+  desc "Reset simulator"
+  lane :reset_simulator do
+    reset_simulator_contents(
+      ios: ["17.0"]
+    )
+  end
+  
+  desc "Take screenshots"
+  lane :screenshots do
+    capture_screenshots(
+      workspace: workspace,
+      scheme: scheme,
+      devices: [
+        "iPhone 15 Pro Max",
+        "iPhone 15 Pro",
+        "iPad Pro (12.9-inch) (6th generation)"
+      ]
+    )
+  end
+  
+  # MARK: - CI/CD Helpers
+  
+  desc "Full CI pipeline - test and build"
+  lane :ci do
+    # Run linting
+    # lint
+    
+    # Run tests
+    test
+    
+    # Build for release
+    build_for_testing
+    
+    UI.success("✅ CI pipeline completed successfully!")
+  end
+  
+  desc "Quick test for development"
+  lane :quick_test do
+    run_tests(
+      workspace: workspace,
+      scheme: scheme,
+      devices: ["iPhone 15 Pro"],
+      skip_build: false,
+      code_coverage: false,
+      disable_concurrent_testing: true
+    )
+  end
+  
+  # MARK: - Error Handling
+  
+  error do |lane, exception, options|
+    UI.error("❌ Error in lane #{lane}")
+    UI.error(exception.message)
+    
+    # Optional: Send notification to Slack or other service
+    # slack(
+    #   message: "Build failed in lane: #{lane}",
+    #   success: false
+    # )
+  end
+end

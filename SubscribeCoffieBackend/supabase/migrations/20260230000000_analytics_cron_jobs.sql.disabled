@@ -1,0 +1,176 @@
+-- Analytics Automated Jobs Setup (pg_cron)
+-- This migration sets up automated scheduling for analytics ETL processes
+
+-- Note: pg_cron must be enabled in your Supabase project first
+-- To enable: Go to Database → Extensions → Enable pg_cron
+
+-- =====================================================
+-- Schedule: Cohort Analytics (Daily at 2:00 AM UTC)
+-- =====================================================
+
+SELECT cron.schedule(
+  'refresh-cohort-analytics',
+  '0 2 * * *',  -- Every day at 2 AM
+  $$SELECT refresh_cohort_analytics();$$
+);
+
+COMMENT ON FUNCTION refresh_cohort_analytics() IS 
+'Scheduled job: Runs daily at 2:00 AM UTC to refresh cohort retention data';
+
+-- =====================================================
+-- Schedule: Churn Risk Analysis (Daily at 3:00 AM UTC)
+-- =====================================================
+
+SELECT cron.schedule(
+  'refresh-churn-risk',
+  '0 3 * * *',  -- Every day at 3 AM
+  $$SELECT refresh_churn_risk();$$
+);
+
+COMMENT ON FUNCTION refresh_churn_risk() IS 
+'Scheduled job: Runs daily at 3:00 AM UTC to calculate churn risk scores';
+
+-- =====================================================
+-- Schedule: Weekly Analytics Report (Monday at 6:00 AM UTC)
+-- =====================================================
+
+-- Create a function to log analytics summary
+CREATE OR REPLACE FUNCTION log_analytics_summary()
+RETURNS void AS $$
+BEGIN
+  -- This function can be expanded to send notifications or generate reports
+  -- For now, it just ensures analytics are up to date
+  PERFORM refresh_cohort_analytics();
+  PERFORM refresh_churn_risk();
+  
+  -- Log the execution
+  RAISE NOTICE 'Weekly analytics summary completed at %', NOW();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+SELECT cron.schedule(
+  'weekly-analytics-summary',
+  '0 6 * * 1',  -- Every Monday at 6 AM
+  $$SELECT log_analytics_summary();$$
+);
+
+-- =====================================================
+-- Schedule: Cleanup old funnel events (Daily at 4:00 AM UTC)
+-- =====================================================
+
+-- Keep only last 90 days of funnel events to manage storage
+CREATE OR REPLACE FUNCTION cleanup_old_funnel_events()
+RETURNS void AS $$
+DECLARE
+  deleted_count INTEGER;
+BEGIN
+  DELETE FROM funnel_events
+  WHERE created_at < NOW() - INTERVAL '90 days';
+  
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  
+  RAISE NOTICE 'Cleaned up % old funnel events', deleted_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+SELECT cron.schedule(
+  'cleanup-old-funnel-events',
+  '0 4 * * *',  -- Every day at 4 AM
+  $$SELECT cleanup_old_funnel_events();$$
+);
+
+-- =====================================================
+-- View Scheduled Jobs
+-- =====================================================
+
+-- To view all scheduled jobs:
+-- SELECT * FROM cron.job;
+
+-- To view job execution history:
+-- SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 10;
+
+-- =====================================================
+-- Unschedule Jobs (if needed)
+-- =====================================================
+
+-- To remove a scheduled job:
+-- SELECT cron.unschedule('refresh-cohort-analytics');
+-- SELECT cron.unschedule('refresh-churn-risk');
+-- SELECT cron.unschedule('weekly-analytics-summary');
+-- SELECT cron.unschedule('cleanup-old-funnel-events');
+
+-- =====================================================
+-- Monitoring and Alerts
+-- =====================================================
+
+-- Create a function to check if analytics are stale
+CREATE OR REPLACE FUNCTION check_analytics_freshness()
+RETURNS TABLE (
+  table_name TEXT,
+  last_updated TIMESTAMPTZ,
+  hours_stale NUMERIC,
+  status TEXT
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    'cohort_analytics'::TEXT as table_name,
+    MAX(updated_at) as last_updated,
+    EXTRACT(EPOCH FROM (NOW() - MAX(updated_at)))/3600 as hours_stale,
+    CASE 
+      WHEN MAX(updated_at) > NOW() - INTERVAL '25 hours' THEN 'OK'
+      WHEN MAX(updated_at) > NOW() - INTERVAL '48 hours' THEN 'WARNING'
+      ELSE 'CRITICAL'
+    END as status
+  FROM cohort_analytics
+  
+  UNION ALL
+  
+  SELECT 
+    'user_churn_risk'::TEXT,
+    MAX(calculated_at),
+    EXTRACT(EPOCH FROM (NOW() - MAX(calculated_at)))/3600,
+    CASE 
+      WHEN MAX(calculated_at) > NOW() - INTERVAL '25 hours' THEN 'OK'
+      WHEN MAX(calculated_at) > NOW() - INTERVAL '48 hours' THEN 'WARNING'
+      ELSE 'CRITICAL'
+    END
+  FROM user_churn_risk;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMENT ON FUNCTION check_analytics_freshness() IS 
+'Check if analytics data is up to date. Returns WARNING if > 25 hours old, CRITICAL if > 48 hours old.';
+
+-- Grant execute permissions
+GRANT EXECUTE ON FUNCTION log_analytics_summary() TO service_role;
+GRANT EXECUTE ON FUNCTION cleanup_old_funnel_events() TO service_role;
+GRANT EXECUTE ON FUNCTION check_analytics_freshness() TO authenticated, service_role;
+
+-- =====================================================
+-- Notes
+-- =====================================================
+
+-- 1. All times are in UTC. Adjust schedules based on your timezone.
+-- 2. Monitor job execution: SELECT * FROM cron.job_run_details WHERE status = 'failed';
+-- 3. Jobs run as the postgres user, so they have full database access.
+-- 4. Consider adding error notifications (email/Slack) for failed jobs.
+-- 5. Backup strategy: pg_cron jobs are stored in the cron schema.
+
+-- =====================================================
+-- Verification
+-- =====================================================
+
+-- Check that jobs are scheduled
+DO $$
+DECLARE
+  job_count INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO job_count FROM cron.job WHERE jobname LIKE '%analytics%';
+  
+  IF job_count < 3 THEN
+    RAISE WARNING 'Only % analytics jobs scheduled. Expected at least 3.', job_count;
+  ELSE
+    RAISE NOTICE '✓ Successfully scheduled % analytics jobs', job_count;
+  END IF;
+END $$;

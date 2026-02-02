@@ -1,0 +1,305 @@
+import Combine
+import SwiftUI
+
+// MARK: - User Reviews View
+struct UserReviewsView: View {
+    @StateObject private var viewModel = UserReviewsViewModel()
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                if viewModel.isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding()
+                } else if viewModel.reviews.isEmpty {
+                    EmptyStateView(
+                        icon: "star.slash",
+                        title: "Нет отзывов",
+                        message: "Оставьте первый отзыв после заказа"
+                    )
+                    .padding()
+                } else {
+                    LazyVStack(spacing: 16) {
+                        ForEach(viewModel.reviews) { review in
+                            UserReviewCardView(review: review)
+                                .padding(.horizontal)
+                        }
+                    }
+                    .padding(.vertical)
+                }
+            }
+            .navigationTitle("Мои отзывы")
+            .navigationBarTitleDisplayMode(.inline)
+            .task {
+                await viewModel.loadReviews()
+            }
+            .refreshable {
+                await viewModel.loadReviews()
+            }
+            .alert("Ошибка", isPresented: $viewModel.showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.errorMessage)
+            }
+        }
+    }
+}
+
+// MARK: - User Review Card
+struct UserReviewCardView: View {
+    let review: Review
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header with Rating
+            HStack {
+                HStack(spacing: 2) {
+                    ForEach(1...5, id: \.self) { star in
+                        Image(systemName: "star.fill")
+                            .foregroundColor(star <= review.rating ? .yellow : .gray.opacity(0.3))
+                            .font(.system(size: 16))
+                    }
+                }
+                
+                Spacer()
+                
+                Text(review.createdAt, style: .date)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            // Verified Badge
+            if review.isVerifiedPurchase {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.caption)
+                    Text("Подтверждённая покупка")
+                        .font(.caption)
+                }
+                .foregroundColor(.green)
+            }
+            
+            // Comment
+            if let comment = review.comment, !comment.isEmpty {
+                Text(comment)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            
+            // Photos
+            if let photos = review.photos, !photos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(photos, id: \.self) { photoUrl in
+                            AsyncImage(url: URL(string: photoUrl)) { image in
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } placeholder: {
+                                Rectangle()
+                                    .fill(Color.gray.opacity(0.2))
+                            }
+                            .frame(width: 100, height: 100)
+                            .cornerRadius(8)
+                        }
+                    }
+                }
+            }
+            
+            // Stats
+            HStack {
+                Image(systemName: "hand.thumbsup")
+                    .foregroundColor(.secondary)
+                Text("\(review.helpfulCount) считают полезным")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - User Reviews View Model
+@MainActor
+class UserReviewsViewModel: ObservableObject {
+    @Published var reviews: [Review] = []
+    @Published var isLoading = false
+    @Published var showError = false
+    @Published var errorMessage = ""
+    
+    private let client = SupabaseClientProvider.client
+    
+    func loadReviews() async {
+        guard let userId = client.auth.currentUser?.id else {
+            return
+        }
+        
+        isLoading = true
+        
+        do {
+            let response = try await client
+                .from("user_reviews")
+                .select()
+                .eq("user_id", value: userId.uuidString)
+                .eq("status", value: "active")
+                .order("created_at", ascending: false)
+                .execute()
+            
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            
+            reviews = try decoder.decode([Review].self, from: response.data)
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+            Logger.error("Failed to load user reviews: \(error)")
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Profile Statistics View
+struct ProfileStatisticsView: View {
+    @StateObject private var viewModel = ProfileStatisticsViewModel()
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Моя активность")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            
+            HStack(spacing: 12) {
+                StatCardView(
+                    icon: "star.fill",
+                    title: "Отзывов",
+                    value: "\(viewModel.reviewsCount)",
+                    color: .yellow
+                )
+                
+                StatCardView(
+                    icon: "heart.fill",
+                    title: "Избранное",
+                    value: "\(viewModel.favoritesCount)",
+                    color: .red
+                )
+                
+                StatCardView(
+                    icon: "person.2.fill",
+                    title: "Друзей",
+                    value: "\(viewModel.friendsCount)",
+                    color: .blue
+                )
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(16)
+        .task {
+            await viewModel.loadStatistics()
+        }
+    }
+}
+
+// MARK: - Stat Card View
+struct StatCardView: View {
+    let icon: String
+    let title: String
+    let value: String
+    let color: Color
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+            
+            Text(value)
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color.white)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
+    }
+}
+
+// MARK: - Profile Statistics View Model
+@MainActor
+class ProfileStatisticsViewModel: ObservableObject {
+    @Published var reviewsCount = 0
+    @Published var favoritesCount = 0
+    @Published var friendsCount = 0
+    
+    private let client = SupabaseClientProvider.client
+    
+    func loadStatistics() async {
+        guard let userId = client.auth.currentUser?.id else {
+            return
+        }
+        
+        async let reviewsTask = loadReviewsCount(userId: userId)
+        async let favoritesTask = loadFavoritesCount(userId: userId)
+        async let friendsTask = loadFriendsCount(userId: userId)
+        
+        do {
+            let (reviews, favorites, friends) = try await (reviewsTask, favoritesTask, friendsTask)
+            self.reviewsCount = reviews
+            self.favoritesCount = favorites
+            self.friendsCount = friends
+        } catch {
+            Logger.error("Failed to load statistics: \(error)")
+        }
+    }
+    
+    private func loadReviewsCount(userId: UUID) async throws -> Int {
+        let response = try await client
+            .from("user_reviews")
+            .select("id", count: .exact)
+            .eq("user_id", value: userId.uuidString)
+            .eq("status", value: "active")
+            .execute()
+        
+        return response.count ?? 0
+    }
+    
+    private func loadFavoritesCount(userId: UUID) async throws -> Int {
+        let response = try await client
+            .from("user_favorites")
+            .select("id", count: .exact)
+            .eq("user_id", value: userId.uuidString)
+            .execute()
+        
+        return response.count ?? 0
+    }
+    
+    private func loadFriendsCount(userId: UUID) async throws -> Int {
+        let response = try await client
+            .from("user_friends")
+            .select("id", count: .exact)
+            .or("user_id.eq.\(userId.uuidString),friend_id.eq.\(userId.uuidString)")
+            .eq("status", value: "accepted")
+            .execute()
+        
+        return response.count ?? 0
+    }
+}
+
+// MARK: - Preview
+#Preview {
+    UserReviewsView()
+}
+
+#Preview("Statistics") {
+    ProfileStatisticsView()
+}

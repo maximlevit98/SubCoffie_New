@@ -1,0 +1,455 @@
+import Combine
+//
+//  LoyaltyDashboardView.swift
+//  SubscribeCoffieClean
+//
+//  Loyalty program dashboard with levels, achievements, and points history
+//
+
+import SwiftUI
+
+struct LoyaltyDashboardView: View {
+    let userId: UUID
+    
+    @StateObject private var viewModel = LoyaltyDashboardViewModel()
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            Group {
+                if viewModel.isLoading {
+                    ProgressView("Загрузка...")
+                } else if let error = viewModel.error {
+                    LoyaltyErrorView(error: error) {
+                        Task {
+                            await viewModel.loadDashboard(userId: userId)
+                        }
+                    }
+                } else if let dashboard = viewModel.dashboard {
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            currentLevelCard(dashboard: dashboard)
+                            progressCard(dashboard: dashboard)
+                            statsCard(dashboard: dashboard)
+                            achievementsSection(dashboard: dashboard)
+                            pointsHistorySection(dashboard: dashboard)
+                        }
+                        .padding()
+                    }
+                    .refreshable {
+                        await viewModel.loadDashboard(userId: userId)
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "Нет данных",
+                        systemImage: "star.circle",
+                        description: Text("Данные программы лояльности недоступны")
+                    )
+                }
+            }
+            .navigationTitle("Программа лояльности")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Закрыть") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .task {
+            await viewModel.loadDashboard(userId: userId)
+        }
+    }
+    
+    // MARK: - Current Level Card
+    
+    @ViewBuilder
+    private func currentLevelCard(dashboard: LoyaltyDashboard) -> some View {
+        if let level = dashboard.currentLevel, let userLoyalty = dashboard.userLoyalty {
+            VStack(spacing: 16) {
+                // Level badge
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Text(level.icon)
+                            .font(.system(size: 60))
+                        
+                        Text(level.levelName)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("\(userLoyalty.totalPoints) баллов")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(level.color.opacity(0.1))
+                )
+                
+                // Benefits
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Преимущества уровня")
+                        .font(.headline)
+                    
+                    ForEach(level.benefits, id: \.self) { benefit in
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(level.color)
+                            Text(benefit)
+                                .font(.subheadline)
+                        }
+                    }
+                }
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+    }
+    
+    // MARK: - Progress Card
+    
+    @ViewBuilder
+    private func progressCard(dashboard: LoyaltyDashboard) -> some View {
+        if let userLoyalty = dashboard.userLoyalty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Прогресс до следующего уровня")
+                    .font(.headline)
+                
+                if userLoyalty.pointsToNextLevel > 0 {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: userLoyalty.progressToNextLevel)
+                            .tint(.accentColor)
+                        
+                        HStack {
+                            Text("Осталось: \(userLoyalty.pointsToNextLevel) баллов")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(Int(userLoyalty.progressToNextLevel * 100))%")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                        }
+                    }
+                } else {
+                    HStack {
+                        Image(systemName: "crown.fill")
+                            .foregroundColor(.yellow)
+                        Text("Максимальный уровень достигнут!")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                    }
+                }
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+    }
+    
+    // MARK: - Stats Card
+    
+    @ViewBuilder
+    private func statsCard(dashboard: LoyaltyDashboard) -> some View {
+        if let userLoyalty = dashboard.userLoyalty {
+            VStack(spacing: 12) {
+                Text("Статистика")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    statItem(
+                        icon: "cup.and.saucer.fill",
+                        title: "Заказов",
+                        value: "\(userLoyalty.lifetimeOrders)",
+                        color: .blue
+                    )
+                    
+                    statItem(
+                        icon: "creditcard.fill",
+                        title: "Потрачено",
+                        value: "\(userLoyalty.lifetimeSpendCredits) ₽",
+                        color: .green
+                    )
+                    
+                    statItem(
+                        icon: "flame.fill",
+                        title: "Текущая серия",
+                        value: "\(userLoyalty.currentStreakDays) дн.",
+                        color: .orange
+                    )
+                    
+                    statItem(
+                        icon: "trophy.fill",
+                        title: "Рекорд серии",
+                        value: "\(userLoyalty.longestStreakDays) дн.",
+                        color: .purple
+                    )
+                }
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+    }
+    
+    private func statItem(icon: String, title: String, value: String, color: Color) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+            
+            Text(value)
+                .font(.headline)
+                .fontWeight(.bold)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(color.opacity(0.1))
+        )
+    }
+    
+    // MARK: - Achievements Section
+    
+    @ViewBuilder
+    private func achievementsSection(dashboard: LoyaltyDashboard) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Достижения")
+                    .font(.headline)
+                Spacer()
+                Text("\(dashboard.unlockedAchievements.count) / \(dashboard.unlockedAchievements.count + dashboard.lockedAchievements.count)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            
+            // Unlocked achievements
+            if !dashboard.unlockedAchievements.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Получены")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    ForEach(dashboard.unlockedAchievements) { item in
+                        achievementRow(
+                            achievement: item.achievement,
+                            isUnlocked: true,
+                            unlockedDate: item.unlockedAt
+                        )
+                    }
+                }
+            }
+            
+            // Locked achievements (first 5)
+            if !dashboard.lockedAchievements.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Доступны")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 8)
+                    
+                    ForEach(dashboard.lockedAchievements.prefix(5)) { achievement in
+                        achievementRow(
+                            achievement: achievement,
+                            isUnlocked: false,
+                            unlockedDate: nil
+                        )
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.secondarySystemBackground))
+        )
+    }
+    
+    private func achievementRow(achievement: Achievement, isUnlocked: Bool, unlockedDate: Date?) -> some View {
+        HStack(spacing: 12) {
+            Text(achievement.icon)
+                .font(.title2)
+                .frame(width: 40, height: 40)
+                .background(
+                    Circle()
+                        .fill(isUnlocked ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.1))
+                )
+                .opacity(isUnlocked ? 1.0 : 0.5)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(achievement.title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(isUnlocked ? .primary : .secondary)
+                
+                Text(achievement.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                
+                if let date = unlockedDate {
+                    Text("Получено: \(date.formatted(date: .abbreviated, time: .omitted))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(spacing: 4) {
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundColor(.yellow)
+                    Text("+\(achievement.pointsReward)")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                }
+                
+                if let progress = achievement.displayProgress {
+                    Text(progress)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(isUnlocked ? Color.accentColor.opacity(0.05) : Color(.tertiarySystemBackground))
+        )
+    }
+    
+    // MARK: - Points History Section
+    
+    @ViewBuilder
+    private func pointsHistorySection(dashboard: LoyaltyDashboard) -> some View {
+        if !dashboard.recentPointsHistory.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("История баллов")
+                    .font(.headline)
+                
+                ForEach(dashboard.recentPointsHistory.prefix(10)) { item in
+                    pointsHistoryRow(item: item)
+                }
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+    }
+    
+    private func pointsHistoryRow(item: LoyaltyPointsHistory) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: item.isPositive ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+                .foregroundColor(item.isPositive ? .green : .red)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.displayReason)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                if let notes = item.notes {
+                    Text(notes)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Text("\(item.isPositive ? "+" : "")\(item.pointsChange)")
+                .font(.subheadline)
+                .fontWeight(.bold)
+                .foregroundColor(item.isPositive ? .green : .red)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.tertiarySystemBackground))
+        )
+    }
+}
+
+// MARK: - Error View
+
+private struct LoyaltyErrorView: View {
+    let error: Error
+    let retry: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 60))
+                .foregroundColor(.orange)
+            
+            Text("Ошибка загрузки")
+                .font(.headline)
+            
+            Text(error.localizedDescription)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            
+            Button("Повторить", action: retry)
+                .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+// MARK: - View Model
+
+@MainActor
+class LoyaltyDashboardViewModel: ObservableObject {
+    @Published var dashboard: LoyaltyDashboard?
+    @Published var isLoading = false
+    @Published var error: Error?
+    
+    private let loyaltyService = LoyaltyService()
+    
+    func loadDashboard(userId: UUID) async {
+        isLoading = true
+        error = nil
+        
+        do {
+            dashboard = try await loyaltyService.getLoyaltyDashboard(userId: userId)
+        } catch {
+            self.error = error
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Preview
+
+#Preview {
+    LoyaltyDashboardView(userId: UUID())
+}

@@ -1,0 +1,158 @@
+import SwiftUI
+
+/// View for selecting a region/city
+struct RegionPickerView: View {
+    @ObservedObject var regionService: RegionService
+    @Binding var selectedRegion: Region?
+    @State private var isShowingPicker = false
+    
+    var body: some View {
+        Button {
+            isShowingPicker = true
+        } label: {
+            HStack {
+                Image(systemName: "location.fill")
+                    .foregroundColor(.brown)
+                
+                if let region = selectedRegion {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(region.displayName)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+                        Text(region.city)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("Выберите город")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.down")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.gray.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $isShowingPicker) {
+            RegionSelectionSheet(
+                regionService: regionService,
+                selectedRegion: $selectedRegion
+            )
+        }
+    }
+}
+
+/// Sheet for selecting a region
+struct RegionSelectionSheet: View {
+    @ObservedObject var regionService: RegionService
+    @Binding var selectedRegion: Region?
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            List {
+                if regionService.isLoading {
+                    HStack {
+                        Spacer()
+                        ProgressView("Загрузка...")
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                } else if let error = regionService.errorMessage {
+                    VStack(spacing: 12) {
+                        Text("Ошибка")
+                            .font(.headline)
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Повторить") {
+                            Task {
+                                try? await regionService.fetchRegions()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .listRowBackground(Color.clear)
+                } else if regionService.regions.isEmpty {
+                    Text("Регионы не найдены")
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .listRowBackground(Color.clear)
+                } else {
+                    Section {
+                        ForEach(regionService.regions.filter { $0.isActive }) { region in
+                            Button {
+                                selectedRegion = region
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(region.displayName)
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                        Text("\(region.city), \(region.country)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    if region.cafeCount > 0 {
+                                        Text("\(region.cafeCount) кофеен")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    
+                                    if selectedRegion?.id == region.id {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(.brown)
+                                            .fontWeight(.semibold)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Text("Доступные регионы")
+                    }
+                }
+            }
+            .navigationTitle("Выбор города")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Закрыть") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .task {
+            if regionService.regions.isEmpty {
+                try? await regionService.fetchRegions()
+            }
+        }
+    }
+}
+
+#Preview {
+    @StateObject var regionService = RegionService()
+    @State var selectedRegion: Region?
+    
+    return RegionPickerView(
+        regionService: regionService,
+        selectedRegion: $selectedRegion
+    )
+}

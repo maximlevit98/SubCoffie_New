@@ -1,0 +1,396 @@
+import SwiftUI
+
+struct MapSelectionView: View {
+
+    enum DisplayMode: String, CaseIterable {
+        case map = "Карта"
+        case list = "Список"
+    }
+
+    let cafes: [CafeSummary]
+    let isLoading: Bool
+    let errorMessage: String?
+    let onRetry: () -> Void
+    let onSelectCafe: (CafeSummary) -> Void
+    @ObservedObject var filterStore: FilterStore
+
+    @State private var mode: DisplayMode = .list
+    @State private var searchText: String = ""
+    @State private var isFilterPresented: Bool = false
+    
+    // Recommendations
+    @State private var cafeRecommendations: [CafeRecommendation] = []
+    @State private var trendingItems: [TrendingItem] = []
+    @State private var isLoadingRecommendations = false
+    @StateObject private var recommendationService = RecommendationService()
+    
+    // Region filtering
+    @StateObject private var regionService = RegionService()
+    @State private var selectedRegion: Region?
+
+    // ✅ ВАЖНО: это computed property, а не let
+    private var filteredCafes: [CafeSummary] {
+        var filtered = cafes
+        
+        // Filter by search text
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            filtered = filtered.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
+        }
+        
+        // Note: Region filtering would require cafe-region mapping from backend
+        // For now, we show all cafes but display the selected region
+        
+        return filtered
+    }
+
+    private var sortedCafes: [CafeSummary] {
+        let sorted = filteredCafes.sorted { lhs, rhs in
+            switch filterStore.state.sortKey {
+            case .distance:
+                return lhs.distanceMinutes < rhs.distanceMinutes
+            case .rating:
+                return ratingScore(for: lhs) < ratingScore(for: rhs)
+            case .avgCheck:
+                return avgCheckScore(for: lhs) < avgCheckScore(for: rhs)
+            }
+        }
+        if filterStore.state.sortOrder == .ascending {
+            return sorted
+        }
+        return Array(sorted.reversed())
+    }
+
+    private var nearestCafe: CafeSummary? {
+        sortedCafes.first
+    }
+
+    private var recommendedMode: DisplayMode {
+        // “как будто знаем геопозицию”: если совсем близко — показываем список
+        let mins = nearestCafe?.distanceMinutes ?? 999
+        return mins <= 8 ? .list : .map
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 14) {
+                Text("Выберите кофейню")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                // Region picker
+                RegionPickerView(
+                    regionService: regionService,
+                    selectedRegion: $selectedRegion
+                )
+
+                searchBar
+                filterBar
+                
+                // Recommendations section
+                if !isLoadingRecommendations {
+                    if !cafeRecommendations.isEmpty {
+                        CafeRecommendationsView(
+                            recommendations: cafeRecommendations,
+                            onSelectCafe: handleRecommendedCafe
+                        )
+                    }
+                    
+                    if !trendingItems.isEmpty {
+                        TrendingItemsView(
+                            items: trendingItems,
+                            onSelectItem: handleTrendingItem
+                        )
+                    }
+                }
+
+                if sortedCafes.isEmpty {
+                    if isLoading {
+                        ProgressView("Загружаем кофейни…")
+                            .padding(.top, 8)
+                    } else if let errorMessage {
+                        VStack(spacing: 8) {
+                            Text(errorMessage)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Повторить") { onRetry() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        .padding(.vertical, 12)
+                    } else {
+                        Text("Кофейни не найдены")
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 12)
+                    }
+                } else {
+                    Picker("", selection: $mode) {
+                        ForEach(DisplayMode.allCases, id: \.self) { m in
+                            Text(m.rawValue).tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    HStack(spacing: 8) {
+                        Text("Рекомендовано: \(recommendedMode.rawValue)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        if let nearestCafe {
+                            Text("Ближайшая: \(nearestCafe.name) • \(formatDistance(nearestCafe))")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    if mode == .map {
+                        mapBlock
+                    } else {
+                        listBlock
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 16)
+        }
+        .onAppear { mode = recommendedMode }
+        .task {
+            await loadRecommendations()
+            // Load regions
+            try? await regionService.fetchRegions()
+        }
+        .sheet(isPresented: $isFilterPresented) {
+            FilterView(state: $filterStore.state)
+        }
+    }
+    
+    // MARK: - Recommendations
+    
+    private func loadRecommendations() async {
+        isLoadingRecommendations = true
+        defer { isLoadingRecommendations = false }
+        
+        // Try to get user ID from auth
+        guard let userId = try? await SupabaseAPIClient.shared.getCurrentUserId() else {
+            // If no user ID, just load trending items for anonymous users
+            await loadTrendingItems()
+            return
+        }
+        
+        // Load personalized cafe recommendations
+        do {
+            cafeRecommendations = try await recommendationService.getCafeRecommendations(
+                userId: userId,
+                limit: 5
+            )
+        } catch {
+            print("Failed to load cafe recommendations: \(error)")
+            cafeRecommendations = []
+        }
+        
+        // Load trending items
+        await loadTrendingItems()
+    }
+    
+    private func loadTrendingItems() async {
+        do {
+            trendingItems = try await recommendationService.getTrendingItems(limit: 10)
+        } catch {
+            print("Failed to load trending items: \(error)")
+            trendingItems = []
+        }
+    }
+    
+    private func handleRecommendedCafe(_ cafeId: UUID) {
+        // Find cafe in list and select it
+        if let cafe = cafes.first(where: { $0.id == cafeId }) {
+            onSelectCafe(cafe)
+        }
+    }
+    
+    private func handleTrendingItem(_ item: TrendingItem) {
+        // Navigate to cafe with this item
+        if let cafe = cafes.first(where: { $0.id == item.cafeId }) {
+            onSelectCafe(cafe)
+        }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+            TextField("Поиск по названию", text: $searchText)
+                .textInputAutocapitalization(.words)
+                .disableAutocorrection(true)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.gray.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var filterBar: some View {
+        HStack {
+            Text(filterStore.state.summaryTitle)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            Spacer()
+            Button {
+                isFilterPresented = true
+            } label: {
+                Label("Фильтры", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func ratingScore(for cafe: CafeSummary) -> Double {
+        if let rating = cafe.rating {
+            return rating
+        }
+        let seed = stableSeed(from: cafe.id)
+        let normalized = Double(seed % 150) / 100.0
+        return 3.5 + normalized
+    }
+
+    private func avgCheckScore(for cafe: CafeSummary) -> Int {
+        if let avgCheck = cafe.avgCheckCredits {
+            return avgCheck
+        }
+        let seed = stableSeed(from: cafe.id)
+        return 180 + (seed % 520)
+    }
+
+    private func stableSeed(from id: UUID) -> Int {
+        let bytes = Array(id.uuidString.utf8)
+        return bytes.reduce(0) { $0 + Int($1) }
+    }
+
+    private var mapBlock: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.brown.opacity(0.2))
+                .frame(height: 260)
+
+            VStack(spacing: 8) {
+                Text("Карта (заглушка)")
+                    .foregroundColor(.brown)
+
+                if let nearestCafe {
+                    Text("Ближайшая: \(nearestCafe.name)")
+                        .font(.footnote)
+                        .foregroundColor(.brown.opacity(0.8))
+                }
+            }
+        }
+    }
+
+    private var listBlock: some View {
+        VStack(spacing: 10) {
+            ForEach(sortedCafes) { cafe in
+                Button {
+                    onSelectCafe(cafe)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "cup.and.saucer.fill")
+                            .foregroundColor(.brown)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text(cafe.name)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.primary)
+
+                                if cafe.id == nearestCafe?.id {
+                                    Text("Ближе всего")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color.green.opacity(0.15))
+                                        .clipShape(Capsule())
+                                        .foregroundColor(.green)
+                                }
+                            }
+
+                            Text("ETA: \(cafe.etaMinutes) мин • \(formatDistance(cafe))")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+
+                            statusChip(for: cafe)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(14)
+                    .opacity(cafe.canPlaceOrder ? 1 : 0.55)
+                }
+                .buttonStyle(.plain)
+                .disabled(!cafe.canPlaceOrder)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func statusChip(for cafe: CafeSummary) -> some View {
+        let text: String
+        let bg: Color
+        let fg: Color
+
+        if cafe.isOverloaded {
+            text = "Overload"
+            bg = Color.red.opacity(0.15)
+            fg = .red
+        } else {
+            // ✅ ВАЖНО: у нас cafe.mode, не cafe.status
+            switch cafe.mode {
+            case .open:
+                text = "Open"
+                bg = Color.green.opacity(0.15)
+                fg = .green
+            case .busy:
+                text = "Busy"
+                bg = Color.orange.opacity(0.15)
+                fg = .orange
+            case .paused:
+                text = "Paused"
+                bg = Color.gray.opacity(0.15)
+                fg = .gray
+            case .closed:
+                text = "Closed"
+                bg = Color.red.opacity(0.15)
+                fg = .red
+            }
+        }
+
+        return Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(bg)
+            .clipShape(Capsule())
+            .foregroundColor(fg)
+    }
+
+    // ✅ Вместо distanceKm (которого нет в модели) показываем минуты и "примерные км"
+    private func formatDistance(_ cafe: CafeSummary) -> String {
+        let km = Double(cafe.distanceMinutes) * 0.25 // заглушка: 1 мин ≈ 0.25 км
+        let s = String(format: "%.1f", km)
+        return "\(cafe.distanceMinutes) мин • \(s) км"
+    }
+}

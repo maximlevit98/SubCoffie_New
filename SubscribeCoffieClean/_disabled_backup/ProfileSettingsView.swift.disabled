@@ -1,0 +1,312 @@
+import SwiftUI
+
+struct ProfileSettingsView: View {
+    @StateObject private var authService = AuthService()
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var fullName: String = ""
+    @State private var city: String = ""
+    @State private var bio: String = ""
+    @State private var birthDate: Date = Date()
+    
+    @State private var notificationsEnabled: Bool = true
+    @State private var emailMarketingEnabled: Bool = false
+    @State private var pushMarketingEnabled: Bool = false
+    
+    @State private var selectedLanguage: String = "ru"
+    @State private var selectedTheme: String = "system"
+    
+    @State private var showingDeleteConfirmation = false
+    @State private var showingLoginHistory = false
+    @State private var showingOAuthManagement = false
+    @State private var isSaving = false
+    @State private var saveMessage: String?
+    
+    let languages = ["ru": "Русский", "en": "English"]
+    let themes = ["light": "Светлая", "dark": "Темная", "system": "Системная"]
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                // Profile Information
+                Section("Личная информация") {
+                    TextField("Полное имя", text: $fullName)
+                        .textContentType(.name)
+                    
+                    TextField("Город", text: $city)
+                        .textContentType(.addressCity)
+                    
+                    DatePicker("Дата рождения", selection: $birthDate, displayedComponents: .date)
+                    
+                    ZStack(alignment: .topLeading) {
+                        if bio.isEmpty {
+                            Text("О себе")
+                                .foregroundColor(.gray.opacity(0.5))
+                                .padding(.top, 8)
+                                .padding(.leading, 4)
+                        }
+                        TextEditor(text: $bio)
+                            .frame(minHeight: 80)
+                    }
+                }
+                
+                // Account Information
+                Section("Аккаунт") {
+                    if let profile = authService.userProfile {
+                        HStack {
+                            Text("Email")
+                            Spacer()
+                            Text(profile.email ?? "—")
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        HStack {
+                            Text("Телефон")
+                            Spacer()
+                            Text(profile.phone ?? "—")
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        HStack {
+                            Text("Способ входа")
+                            Spacer()
+                            Text(authProviderName(profile.authProvider))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        HStack {
+                            Text("Статус")
+                            Spacer()
+                            if profile.isVerified {
+                                Label("Подтвержден", systemImage: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                    .font(.subheadline)
+                            } else {
+                                Label("Не подтвержден", systemImage: "exclamationmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.subheadline)
+                            }
+                        }
+                    }
+                    
+                    Button {
+                        showingOAuthManagement = true
+                    } label: {
+                        HStack {
+                            Text("Способы входа")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                }
+                
+                // Notifications
+                Section("Уведомления") {
+                    Toggle("Push-уведомления", isOn: $notificationsEnabled)
+                    Toggle("Email рассылка", isOn: $emailMarketingEnabled)
+                    Toggle("Push маркетинг", isOn: $pushMarketingEnabled)
+                }
+                
+                // Preferences
+                Section("Настройки приложения") {
+                    Picker("Язык", selection: $selectedLanguage) {
+                        ForEach(Array(languages.keys.sorted()), id: \.self) { key in
+                            Text(languages[key] ?? key).tag(key)
+                        }
+                    }
+                    
+                    Picker("Тема", selection: $selectedTheme) {
+                        ForEach(Array(themes.keys.sorted()), id: \.self) { key in
+                            Text(themes[key] ?? key).tag(key)
+                        }
+                    }
+                }
+                
+                // Security
+                Section("Безопасность") {
+                    Button {
+                        showingLoginHistory = true
+                    } label: {
+                        HStack {
+                            Text("История входов")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                    
+                    Button {
+                        Task {
+                            await changePassword()
+                        }
+                    } label: {
+                        Text("Изменить пароль")
+                    }
+                }
+                
+                // Danger Zone
+                Section("Опасная зона") {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Text("Удалить аккаунт")
+                    }
+                }
+                
+                if let saveMessage {
+                    Section {
+                        Text(saveMessage)
+                            .foregroundColor(.green)
+                            .font(.subheadline)
+                    }
+                }
+            }
+            .navigationTitle("Настройки профиля")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+                
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Сохранить") {
+                        Task {
+                            await saveProfile()
+                        }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .sheet(isPresented: $showingLoginHistory) {
+                LoginHistoryView()
+            }
+            .sheet(isPresented: $showingOAuthManagement) {
+                OAuthManagementView()
+            }
+            .alert("Удалить аккаунт?", isPresented: $showingDeleteConfirmation) {
+                Button("Отмена", role: .cancel) { }
+                Button("Удалить", role: .destructive) {
+                    Task {
+                        await deleteAccount()
+                    }
+                }
+            } message: {
+                Text("Это действие нельзя отменить. Все ваши данные будут удалены.")
+            }
+            .overlay {
+                if isSaving {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black.opacity(0.2))
+                }
+            }
+            .task {
+                await loadProfile()
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    
+    private func authProviderName(_ provider: String) -> String {
+        switch provider {
+        case "email": return "Email"
+        case "google": return "Google"
+        case "apple": return "Apple"
+        case "phone": return "Телефон"
+        default: return provider.capitalized
+        }
+    }
+    
+    private func loadProfile() async {
+        await authService.checkSession()
+        
+        if let profile = authService.userProfile {
+            fullName = profile.fullName ?? ""
+            city = profile.city ?? ""
+            bio = profile.bio ?? ""
+            
+            if let birthDateString = profile.birthDate,
+               let date = ISO8601DateFormatter().date(from: birthDateString) {
+                birthDate = date
+            }
+            
+            notificationsEnabled = profile.notificationEnabled
+            emailMarketingEnabled = profile.emailMarketingEnabled
+            pushMarketingEnabled = profile.pushMarketingEnabled
+            selectedLanguage = profile.preferredLanguage
+            selectedTheme = profile.theme
+        }
+    }
+    
+    private func saveProfile() async {
+        isSaving = true
+        saveMessage = nil
+        defer { isSaving = false }
+        
+        do {
+            // Update profile information
+            _ = try await authService.updateProfile(
+                fullName: fullName.isEmpty ? nil : fullName,
+                birthDate: birthDate,
+                city: city.isEmpty ? nil : city,
+                bio: bio.isEmpty ? nil : bio
+            )
+            
+            // Update preferences
+            try await authService.updatePreferences(
+                notificationsEnabled: notificationsEnabled,
+                emailMarketingEnabled: emailMarketingEnabled,
+                pushMarketingEnabled: pushMarketingEnabled,
+                language: selectedLanguage,
+                theme: selectedTheme
+            )
+            
+            saveMessage = "✓ Профиль успешно обновлен"
+            
+            // Auto-dismiss after 2 seconds
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            dismiss()
+        } catch {
+            saveMessage = "Ошибка: \(error.localizedDescription)"
+        }
+    }
+    
+    private func changePassword() async {
+        guard let email = authService.userProfile?.email else {
+            saveMessage = "Email не найден"
+            return
+        }
+        
+        do {
+            try await authService.sendPasswordResetEmail(email: email)
+            saveMessage = "✓ Ссылка для сброса пароля отправлена на \(email)"
+        } catch {
+            saveMessage = "Ошибка: \(error.localizedDescription)"
+        }
+    }
+    
+    private func deleteAccount() async {
+        do {
+            try await authService.requestAccountDeletion(reason: "User requested deletion")
+            saveMessage = "✓ Запрос на удаление аккаунта отправлен"
+            
+            // Sign out after requesting deletion
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try await authService.signOut()
+            dismiss()
+        } catch {
+            saveMessage = "Ошибка: \(error.localizedDescription)"
+        }
+    }
+}
+
+#Preview {
+    ProfileSettingsView()
+}

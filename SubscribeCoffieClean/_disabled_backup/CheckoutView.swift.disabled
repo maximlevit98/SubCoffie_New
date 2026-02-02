@@ -1,0 +1,904 @@
+import SwiftUI
+
+struct CheckoutView: View {
+    let cafe: CafeSummary
+    @ObservedObject var cart: CartStore
+    @ObservedObject var wallet: WalletStore
+    @ObservedObject var cafeWallet: CafeWalletStore
+    let initialBonus: Int
+
+    let onPlaceOrder: (_ subtotalCredits: Int, _ bonusUsed: Int, _ paidCredits: Int, _ cashbackApplied: Int, _ pickupSlot: String?) -> Void
+
+    @AppStorage("sc_defaultBonusWallet") private var defaultBonusWalletRaw: String = ""
+    @AppStorage("sc_selected_slot_iso") private var selectedSlotISOStorage: String = ""
+    @AppStorage("sc_selected_slot_eta_sec") private var selectedSlotEtaStorage: Int = 0
+
+    @State private var bonusToUse: Int = 0
+    @State private var bonusWalletKind: WalletKind?
+    @State private var timeSlots: [TimeSlotOption] = []
+    @State private var selectedSlotISO: String = ""
+    @State private var isLoadingSlots: Bool = false
+    
+    // Promo code state
+    @State private var promoCode: String = ""
+    @State private var promoCodeDiscount: Int = 0
+    @State private var promoCodeError: String? = nil
+    @State private var isValidatingPromo: Bool = false
+    @State private var appliedPromoCode: String? = nil
+    
+    // Delivery state
+    @State private var isDelivery: Bool = false
+    @State private var deliveryAddress: String = ""
+    @State private var deliveryLatitude: Double?
+    @State private var deliveryLongitude: Double?
+    @State private var deliveryNotes: String = ""
+    @State private var deliveryFeeInfo: DeliveryFeeInfo?
+    @State private var isCalculatingDeliveryFee: Bool = false
+    @State private var customerName: String = ""
+    @State private var customerPhone: String = ""
+
+    private var subtotal: Int { cart.subtotalCredits }
+
+    // PURE caps by rules
+    private var maxBonus: Int {
+        guard cart.hasDrink else { return 0 }
+        let capPercent: Double = cart.hasNonDrink ? 1.0 : 0.5
+        let cap = Int(Double(subtotal) * capPercent)
+        let available = availableBonusBalance()
+        return max(0, min(available, cap))
+    }
+
+    private var deliveryFee: Int {
+        guard isDelivery, let feeInfo = deliveryFeeInfo, feeInfo.available else { return 0 }
+        return feeInfo.deliveryFeeCredits ?? 0
+    }
+    
+    private var paidCredits: Int {
+        max(0, subtotal - bonusToUse - promoCodeDiscount + deliveryFee)
+    }
+
+    private var selectedBonusWalletKind: WalletKind? {
+        bonusWalletKind ?? WalletKind(rawValue: defaultBonusWalletRaw)
+    }
+
+    private var canPlace: Bool {
+        let baseConditions = !cart.lines.isEmpty
+            && cafe.canPlaceOrder
+            && wallet.credits >= paidCredits
+            && selectedBonusWalletKind != nil
+        
+        if isDelivery {
+            return baseConditions
+                && !deliveryAddress.isEmpty
+                && deliveryLatitude != nil
+                && deliveryLongitude != nil
+                && deliveryFeeInfo?.available == true
+        } else {
+            return baseConditions && !selectedSlotISO.isEmpty
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+            Text("Оформление")
+                .font(.title2)
+                .fontWeight(.bold)
+
+            Text(cafe.name)
+                .foregroundColor(.secondary)
+
+            walletBlock
+            deliveryBlock
+            orderSummaryBlock
+            promoCodeBlock
+            
+            if !isDelivery {
+                timeSlotBlock
+            }
+            
+            bonusBlock
+
+            Button("Подтвердить заказ") {
+                handlePay()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canPlace)
+            .opacity(canPlace ? 1 : 0.5)
+
+            if !cafe.canPlaceOrder {
+                Text("Кофейня сейчас не принимает pre-order (Paused/Closed/Overload).")
+                    .font(.footnote)
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            } else if cafe.mode == .busy {
+                Text("Кофейня перегружена, время ожидания может увеличиться.")
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            } else if wallet.credits < paidCredits {
+                Text("Не хватает Credits. Пополни демо-кошелёк.")
+                    .font(.footnote)
+                    .foregroundColor(.red)
+            }
+
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .padding(.bottom, 24)
+        }
+        .onAppear {
+            bonusWalletKind = WalletKind(rawValue: defaultBonusWalletRaw)
+            bonusToUse = min(initialBonus, maxBonus)
+        }
+        .task(id: maxBonus) {
+            bonusToUse = min(bonusToUse, maxBonus)
+        }
+        .task(id: slotsRequestKey) {
+            await loadTimeSlots()
+        }
+        .onChange(of: selectedSlotISO, initial: false) { _, newValue in
+            selectedSlotISOStorage = newValue
+            selectedSlotEtaStorage = timeSlots.first(where: { $0.iso == newValue })?.etaSec ?? 0
+        }
+    }
+
+    private var walletBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Кошелёк")
+                .font(.headline)
+
+            walletPickerBlock
+
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CityPass Bonus+: \(wallet.bonusBalance)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Text("Cafe Bonus+: \(cafeWallet.bonus)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+    
+    private var deliveryBlock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Способ получения")
+                    .font(.headline)
+                Spacer()
+            }
+            
+            // Delivery toggle
+            Picker("", selection: $isDelivery) {
+                Text("Самовывоз").tag(false)
+                Text("Доставка").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: isDelivery) { _, newValue in
+                if newValue {
+                    // Reset time slot when switching to delivery
+                    selectedSlotISO = ""
+                }
+            }
+            
+            if isDelivery {
+                Divider()
+                
+                // Customer info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Контактная информация")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    
+                    TextField("Ваше имя", text: $customerName)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    TextField("Телефон", text: $customerPhone)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.phonePad)
+                }
+                
+                Divider()
+                
+                // Delivery address
+                DeliveryAddressView(
+                    address: $deliveryAddress,
+                    latitude: $deliveryLatitude,
+                    longitude: $deliveryLongitude,
+                    notes: $deliveryNotes
+                )
+                .onChange(of: deliveryLatitude) { _, _ in
+                    if deliveryLatitude != nil && deliveryLongitude != nil {
+                        Task {
+                            await calculateDeliveryFee()
+                        }
+                    }
+                }
+                .onChange(of: deliveryLongitude) { _, _ in
+                    if deliveryLatitude != nil && deliveryLongitude != nil {
+                        Task {
+                            await calculateDeliveryFee()
+                        }
+                    }
+                }
+                
+                // Delivery fee info
+                if isCalculatingDeliveryFee {
+                    HStack {
+                        ProgressView()
+                        Text("Расчёт стоимости доставки...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                } else if let feeInfo = deliveryFeeInfo {
+                    if feeInfo.available {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("Доставка доступна")
+                                    .font(.subheadline)
+                                    .foregroundColor(.green)
+                                Spacer()
+                            }
+                            
+                            if let fee = feeInfo.deliveryFeeCredits {
+                                HStack {
+                                    Text("Стоимость доставки:")
+                                        .font(.subheadline)
+                                    Spacer()
+                                    if feeInfo.isFree == true {
+                                        Text("БЕСПЛАТНО")
+                                            .font(.subheadline)
+                                            .fontWeight(.bold)
+                                            .foregroundColor(.green)
+                                    } else {
+                                        Text("\(fee) Credits")
+                                            .font(.subheadline)
+                                            .fontWeight(.semibold)
+                                    }
+                                }
+                            }
+                            
+                            if let distance = feeInfo.distanceKm {
+                                HStack {
+                                    Text("Расстояние:")
+                                        .font(.subheadline)
+                                    Spacer()
+                                    Text(String(format: "%.2f км", distance))
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            
+                            if let eta = feeInfo.estimatedTimeMinutes {
+                                HStack {
+                                    Image(systemName: "clock")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Text("≈ \(eta) минут")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Доставка недоступна")
+                                    .font(.subheadline)
+                                    .foregroundColor(.orange)
+                                Spacer()
+                            }
+                            
+                            if let reason = feeInfo.reason {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            if let minAmount = feeInfo.minOrderAmountCredits {
+                                Text("Минимальная сумма заказа: \(minAmount) Credits")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+
+    private var orderSummaryBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Состав заказа")
+                .font(.headline)
+
+            ForEach(cart.lines) { item in
+                HStack {
+                    Text(item.title).lineLimit(1)
+                    Spacer()
+                    Text("×\(item.quantity)").foregroundColor(.secondary)
+                    Text("\(item.lineTotal)")
+                        .fontWeight(.semibold)
+                        .frame(width: 70, alignment: .trailing)
+                }
+                .font(.subheadline)
+            }
+
+            Divider()
+
+            HStack {
+                Text("Подытог")
+                Spacer()
+                Text("\(subtotal) Credits")
+                    .fontWeight(.semibold)
+            }
+            
+            if promoCodeDiscount > 0 {
+                HStack {
+                    Text("Промокод \(appliedPromoCode ?? "")")
+                        .foregroundColor(.green)
+                    Spacer()
+                    Text("-\(promoCodeDiscount) Credits")
+                        .fontWeight(.semibold)
+                        .foregroundColor(.green)
+                }
+                .font(.subheadline)
+            }
+            
+            if deliveryFee > 0 {
+                HStack {
+                    Text("Доставка")
+                    Spacer()
+                    Text("+\(deliveryFee) Credits")
+                        .fontWeight(.semibold)
+                }
+                .font(.subheadline)
+            } else if isDelivery && deliveryFeeInfo?.isFree == true {
+                HStack {
+                    Text("Доставка")
+                    Spacer()
+                    Text("БЕСПЛАТНО")
+                        .fontWeight(.semibold)
+                        .foregroundColor(.green)
+                }
+                .font(.subheadline)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+    
+    private var promoCodeBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Промокод")
+                .font(.headline)
+            
+            if let applied = appliedPromoCode {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Применён: \(applied)")
+                        .font(.subheadline)
+                        .foregroundColor(.green)
+                    Spacer()
+                    Button("Удалить") {
+                        removePromoCode()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    TextField("Введите промокод", text: $promoCode)
+                        .textFieldStyle(.roundedBorder)
+                        .autocapitalization(.allCharacters)
+                        .disableAutocorrection(true)
+                    
+                    Button(action: validateAndApplyPromoCode) {
+                        if isValidatingPromo {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .frame(width: 20, height: 20)
+                        } else {
+                            Text("Применить")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(promoCode.isEmpty || isValidatingPromo)
+                }
+                
+                if let error = promoCodeError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+
+    private var timeSlotBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Время готовности")
+                .font(.headline)
+
+            if isLoadingSlots {
+                Text("Обновляем слоты…")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else if let nearest = timeSlots.first {
+                Text("Ближайшее: \(nearest.display)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            VStack(spacing: 8) {
+                ForEach(timeSlots) { slot in
+                    Button {
+                        selectedSlotISO = slot.iso
+                    } label: {
+                        HStack {
+                            Image(systemName: selectedSlotISO == slot.iso ? "largecircle.fill.circle" : "circle")
+                                .foregroundColor(.accentColor)
+                            Text(slot.display)
+                                .font(.subheadline)
+                            Spacer()
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+
+    private var bonusBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Скидка Bonus+")
+                .font(.headline)
+
+            if selectedBonusWalletKind == nil {
+                Text("Выберите кошелёк для списания и начисления кэшбэка.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            if !cart.hasDrink {
+                Text("Добавь напиток, чтобы активировать скидки на допы (правило продукта).")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else if maxBonus == 0 {
+                Text("Сейчас нельзя списать Bonus+ (лимиты / дневной кап / нет доступных бонусов).")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else {
+                Stepper(
+                    "Списать: \(bonusToUse) Bonus+ (max \(maxBonus))",
+                    value: $bonusToUse,
+                    in: 0...maxBonus,
+                    step: 10
+                )
+                .font(.subheadline)
+            }
+
+            HStack {
+                Text("К оплате Credits")
+                Spacer()
+                Text("\(paidCredits)")
+                    .fontWeight(.semibold)
+            }
+
+            if let walletKind = selectedBonusWalletKind {
+                HStack {
+                    Text("Кэшбек будет начислен в")
+                    Spacer()
+                    Text(walletKind.title)
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(14)
+    }
+
+    private var walletPickerBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Куда начислять бонусы")
+                Spacer()
+            }
+            if let current = selectedBonusWalletKind {
+                HStack {
+                    Text(current.title)
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Button("Изменить") {
+                        bonusWalletKind = nil
+                        defaultBonusWalletRaw = ""
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else {
+                Picker("Кошелёк", selection: Binding(get: {
+                    bonusWalletKind ?? WalletKind(rawValue: defaultBonusWalletRaw)
+                }, set: { newValue in
+                    bonusWalletKind = newValue
+                    if let kind = newValue {
+                        defaultBonusWalletRaw = kind.rawValue
+                    }
+                })) {
+                    Text("CityPass").tag(WalletKind.cityPass as WalletKind?)
+                    Text("Cafe Wallet").tag(WalletKind.cafe as WalletKind?)
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+    }
+
+    private func availableBonusBalance() -> Int {
+        switch selectedBonusWalletKind {
+        case .cityPass:
+            return wallet.availableBonusBalance()
+        case .cafe:
+            return cafeWallet.bonus
+        case .none:
+            return 0
+        }
+    }
+    
+    private func validateAndApplyPromoCode() {
+        guard !promoCode.isEmpty else { return }
+        
+        isValidatingPromo = true
+        promoCodeError = nil
+        
+        Task {
+            do {
+                let apiClient = SupabaseAPIClient()
+                
+                // Get current user ID (in a real app, this would come from auth)
+                // For MVP, we'll use a placeholder
+                guard let userId = try? await getCurrentUserId() else {
+                    await MainActor.run {
+                        promoCodeError = "Не удалось получить данные пользователя"
+                        isValidatingPromo = false
+                    }
+                    return
+                }
+                
+                let payload = ValidatePromoRequest(
+                    p_code: promoCode.uppercased(),
+                    p_user_id: userId,
+                    p_order_amount: Double(subtotal)
+                )
+                
+                let encoder = JSONEncoder()
+                encoder.keyEncodingStrategy = .convertToSnakeCase
+                let body = try encoder.encode(payload)
+                
+                let response: PromoValidationResponse = try await apiClient.post("rpc/validate_promo_code", body: body)
+                
+                await MainActor.run {
+                    if response.valid {
+                        appliedPromoCode = promoCode.uppercased()
+                        promoCodeDiscount = Int(response.discountAmount ?? 0)
+                        promoCodeError = nil
+                        promoCode = ""
+                    } else {
+                        promoCodeError = response.error ?? "Промокод недействителен"
+                    }
+                    isValidatingPromo = false
+                }
+            } catch {
+                await MainActor.run {
+                    promoCodeError = "Ошибка проверки промокода: \(error.localizedDescription)"
+                    isValidatingPromo = false
+                }
+            }
+        }
+    }
+    
+    private func removePromoCode() {
+        appliedPromoCode = nil
+        promoCodeDiscount = 0
+        promoCodeError = nil
+    }
+    
+    private func getCurrentUserId() async throws -> UUID {
+        // In a real app, get this from SupabaseClientProvider auth
+        // For MVP, we can use a hardcoded value or get from UserDefaults
+        // This is a placeholder implementation
+        if let userIdString = UserDefaults.standard.string(forKey: "sc_user_id"),
+           let userId = UUID(uuidString: userIdString) {
+            return userId
+        }
+        throw NSError(domain: "CheckoutView", code: -1, userInfo: [NSLocalizedDescriptionKey: "User ID not found"])
+    }
+
+    private func handlePay() {
+        guard let walletKind = selectedBonusWalletKind else { return }
+        let subtotal = self.subtotal
+        let useBonus = min(bonusToUse, maxBonus)
+        let toPay = max(0, subtotal - useBonus)
+
+        // списание бонусов
+        if useBonus > 0 {
+            switch walletKind {
+            case .cityPass:
+                wallet.spendBonus(useBonus)
+            case .cafe:
+                cafeWallet.spendBonus(useBonus)
+            }
+        }
+
+        // списание credits (оставляем оплату из CityPass для MVP)
+        guard wallet.spendCredits(toPay) else { return }
+
+        // кэшбэк
+        let rate = wallet.cashbackRate(for: cart)
+        let cashback = Int(Double(subtotal) * rate)
+        if cashback > 0 {
+            switch walletKind {
+            case .cityPass:
+                wallet.addBonus(cashback)
+            case .cafe:
+                cafeWallet.addBonus(cashback)
+            }
+        }
+
+        onPlaceOrder(subtotal, useBonus, toPay, cashback, selectedSlotISO)
+    }
+
+    private func refreshSlots() {
+        let slots = buildTimeSlots()
+        timeSlots = slots
+        if let first = slots.first {
+            selectedSlotISO = first.iso
+        }
+    }
+
+    private func buildTimeSlots() -> [TimeSlotOption] {
+        let eta = max(0, cafe.etaMinutes)
+        let now = Date()
+        let base = now.addingTimeInterval(TimeInterval(eta * 60))
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.locale = Locale(identifier: "ru_RU")
+        let isoFormatter = ISO8601DateFormatter()
+        let stepMinutes = 10
+        return (0..<4).map { index in
+            let date = Calendar.current.date(byAdding: .minute, value: index * stepMinutes, to: base) ?? base
+            return TimeSlotOption(
+                iso: isoFormatter.string(from: date),
+                display: formatter.string(from: date),
+                etaSec: Int(max(0, date.timeIntervalSince(now)))
+            )
+        }
+    }
+
+    private var slotsRequestKey: String {
+        let itemsKey = cart.lines
+            .map { "\($0.product.id.uuidString):\($0.quantity)" }
+            .joined(separator: "|")
+        return "\(cafe.id.uuidString)|\(itemsKey)"
+    }
+
+    private func loadTimeSlots() async {
+        isLoadingSlots = true
+        defer { isLoadingSlots = false }
+        do {
+            if let slots = try await fetchTimeSlotsFromRPC() {
+                timeSlots = slots
+                if !slots.contains(where: { $0.iso == selectedSlotISO }) {
+                    selectedSlotISO = slots.first?.iso ?? ""
+                }
+                return
+            }
+        } catch {
+            #if DEBUG
+            print("Time slots fallback: \(error.localizedDescription)")
+            #endif
+        }
+        refreshSlots()
+    }
+
+    private func fetchTimeSlotsFromRPC() async throws -> [TimeSlotOption]? {
+        let apiClient = SupabaseAPIClient()
+        let payload = RpcTimeSlotsRequest(
+            cafeId: cafe.id,
+            cartItems: cart.lines.map {
+                RpcCartItem(
+                    id: $0.product.id,
+                    qty: $0.quantity,
+                    prepTimeSec: prepTimeSeconds(for: $0.product)
+                )
+            },
+            now: Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let body = try encoder.encode(payload)
+        let rows: [RpcSlotRow] = try await apiClient.post("rpc/get_time_slots", body: body)
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "HH:mm"
+        displayFormatter.locale = Locale(identifier: "ru_RU")
+        let isoFormatter = ISO8601DateFormatter()
+        let now = Date()
+        let options = rows.compactMap { row -> TimeSlotOption? in
+            guard let date = parseISODate(row.slotStart) else { return nil }
+            return TimeSlotOption(
+                iso: isoFormatter.string(from: date),
+                display: displayFormatter.string(from: date),
+                etaSec: Int(max(0, date.timeIntervalSince(now)))
+            )
+        }
+        #if DEBUG
+        let prepList = payload.cartItems.map { $0.description }.joined(separator: ", ")
+        print("Time slots RPC payload items: [\(prepList)]")
+        #endif
+        return options.isEmpty ? nil : options
+    }
+
+    private func prepTimeSeconds(for product: CafeProduct) -> Int {
+        if let prep = product.prepTimeSec, prep > 0 {
+            return prep
+        }
+        switch product.category {
+        case .drinks: return 120
+        case .food: return 300
+        case .syrups: return 60
+        case .merch: return 30
+        }
+    }
+
+    private func parseISODate(_ raw: String) -> Date? {
+        let iso = ISO8601DateFormatter()
+        if let date = iso.date(from: raw) { return date }
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return iso.date(from: raw)
+    }
+    
+    private func calculateDeliveryFee() async {
+        guard let lat = deliveryLatitude, let lon = deliveryLongitude else { return }
+        
+        isCalculatingDeliveryFee = true
+        defer { isCalculatingDeliveryFee = false }
+        
+        do {
+            let apiClient = SupabaseAPIClient()
+            let request = CalculateDeliveryFeeRequest(
+                cafeId: cafe.id,
+                deliveryLat: lat,
+                deliveryLon: lon,
+                orderAmountCredits: subtotal
+            )
+            let body = try JSONEncoder().encode(request)
+            let response: DeliveryFeeInfo = try await apiClient.post("rpc/calculate_delivery_fee", body: body)
+            
+            await MainActor.run {
+                self.deliveryFeeInfo = response
+            }
+        } catch {
+            #if DEBUG
+            print("Error calculating delivery fee: \(error)")
+            #endif
+            await MainActor.run {
+                self.deliveryFeeInfo = DeliveryFeeInfo(
+                    available: false,
+                    deliveryFeeCredits: nil,
+                    distanceKm: nil,
+                    isFree: nil,
+                    estimatedTimeMinutes: nil,
+                    zoneId: nil,
+                    reason: "Ошибка расчёта стоимости доставки",
+                    minOrderAmountCredits: nil,
+                    currentAmountCredits: nil
+                )
+            }
+        }
+    }
+}
+
+private struct TimeSlotOption: Identifiable, Equatable {
+    let iso: String
+    let display: String
+    let etaSec: Int
+
+    var id: String { iso }
+}
+
+private struct RpcTimeSlotsRequest: Encodable {
+    let cafeId: UUID
+    let cartItems: [RpcCartItem]
+    let now: Date
+
+    enum CodingKeys: String, CodingKey {
+        case cafeId = "p_cafe_id"
+        case cartItems = "p_cart_items"
+        case now = "p_now"
+    }
+}
+
+private struct RpcCartItem: Encodable, CustomStringConvertible {
+    let id: UUID
+    let qty: Int
+    let prepTimeSec: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case qty
+        case prepTimeSec = "prep_time_sec"
+    }
+
+    var description: String {
+        "{id:\(id.uuidString), qty:\(qty), prep_time_sec:\(prepTimeSec)}"
+    }
+}
+
+private struct RpcSlotRow: Decodable {
+    let slotStart: String
+
+    enum CodingKeys: String, CodingKey {
+        case slotStart = "slot_start"
+    }
+}
+
+private struct ValidatePromoRequest: Encodable {
+    let p_code: String
+    let p_user_id: UUID
+    let p_order_amount: Double
+}
+
+private struct PromoValidationResponse: Decodable {
+    let valid: Bool
+    let error: String?
+    let promoId: UUID?
+    let code: String?
+    let description: String?
+    let discountType: String?
+    let discountValue: Double?
+    let discountAmount: Double?
+    let originalAmount: Double?
+    let finalAmount: Double?
+    let savings: Double?
+    
+    enum CodingKeys: String, CodingKey {
+        case valid
+        case error
+        case promoId = "promo_id"
+        case code
+        case description
+        case discountType = "discount_type"
+        case discountValue = "discount_value"
+        case discountAmount = "discount_amount"
+        case originalAmount = "original_amount"
+        case finalAmount = "final_amount"
+        case savings
+    }
+}

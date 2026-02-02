@@ -1,0 +1,113 @@
+-- Migration: Real-time configuration for order updates
+-- Description: Enable real-time subscriptions for orders table
+
+-- Enable realtime for orders table
+ALTER PUBLICATION supabase_realtime ADD TABLE orders;
+
+-- Create function to get order channel name
+CREATE OR REPLACE FUNCTION subscribe_to_order_updates(p_order_id UUID)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_order_exists BOOLEAN;
+    v_result JSON;
+BEGIN
+    -- Check if order exists and user has access
+    SELECT EXISTS(
+        SELECT 1 FROM orders 
+        WHERE id = p_order_id
+    ) INTO v_order_exists;
+
+    IF NOT v_order_exists THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Order not found'
+        );
+    END IF;
+
+    -- Return channel information
+    v_result := json_build_object(
+        'success', true,
+        'channel', 'orders:' || p_order_id::TEXT,
+        'order_id', p_order_id
+    );
+
+    RETURN v_result;
+END;
+$$;
+
+-- Create function to broadcast order status updates
+CREATE OR REPLACE FUNCTION notify_order_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- This trigger will automatically notify subscribers when order status changes
+    PERFORM pg_notify(
+        'order_update',
+        json_build_object(
+            'order_id', NEW.id,
+            'status', NEW.status,
+            'updated_at', NEW.updated_at
+        )::text
+    );
+    RETURN NEW;
+END;
+$$;
+
+-- Create trigger for order updates
+DROP TRIGGER IF EXISTS order_status_update_trigger ON orders;
+CREATE TRIGGER order_status_update_trigger
+    AFTER UPDATE OF status ON orders
+    FOR EACH ROW
+    WHEN (OLD.status IS DISTINCT FROM NEW.status)
+    EXECUTE FUNCTION notify_order_update();
+
+-- Grant necessary permissions
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION subscribe_to_order_updates(UUID) TO authenticated;
+
+-- Create view for active orders with real-time support
+CREATE OR REPLACE VIEW active_orders_realtime AS
+SELECT 
+    o.id,
+    o.user_id,
+    o.cafe_id,
+    o.status,
+    o.total_amount,
+    o.created_at,
+    o.updated_at,
+    o.ready_at,
+    o.picked_up_at,
+    c.name as cafe_name,
+    c.address as cafe_address,
+    json_agg(
+        json_build_object(
+            'item_id', oi.menu_item_id,
+            'item_name', mi.name,
+            'quantity', oi.quantity,
+            'price', oi.price_at_time
+        ) ORDER BY oi.id
+    ) as items
+FROM orders o
+JOIN cafes c ON o.cafe_id = c.id
+LEFT JOIN order_items oi ON o.id = oi.order_id
+LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+WHERE o.status IN ('pending', 'accepted', 'preparing', 'ready')
+GROUP BY o.id, o.user_id, o.cafe_id, o.status, o.total_amount, 
+         o.created_at, o.updated_at, o.ready_at, o.picked_up_at,
+         c.name, c.address;
+
+-- Grant select on view
+GRANT SELECT ON active_orders_realtime TO authenticated;
+
+-- RLS policy for active orders view
+CREATE POLICY "Users can view their own active orders"
+    ON orders FOR SELECT
+    USING (auth.uid() = user_id);
+
+-- Comment
+COMMENT ON FUNCTION subscribe_to_order_updates IS 'Returns channel name for subscribing to order updates';
+COMMENT ON VIEW active_orders_realtime IS 'Real-time view of active orders with cafe and items details';

@@ -1,0 +1,297 @@
+-- Enhanced authentication: OAuth + Email
+-- Extends existing profiles table with OAuth support
+
+-- Add new columns for OAuth and enhanced authentication
+do $$
+begin
+  -- Add avatar_url for profile pictures from OAuth providers
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'avatar_url'
+  ) then
+    alter table public.profiles add column avatar_url text;
+  end if;
+
+  -- Add auth_provider to track authentication method
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'auth_provider'
+  ) then
+    alter table public.profiles add column auth_provider text default 'email';
+  end if;
+
+  -- Add last_sign_in_at for user activity tracking
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'last_sign_in_at'
+  ) then
+    alter table public.profiles add column last_sign_in_at timestamptz;
+  end if;
+
+  -- Add updated_at for profile updates tracking
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'updated_at'
+  ) then
+    alter table public.profiles add column updated_at timestamptz not null default now();
+  end if;
+
+  -- Add is_active for account status
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'profiles' and column_name = 'is_active'
+  ) then
+    alter table public.profiles add column is_active boolean not null default true;
+  end if;
+end$$;
+
+-- Add constraint for auth_provider
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'profiles_auth_provider_check' and conrelid = 'public.profiles'::regclass
+  ) then
+    alter table public.profiles
+      add constraint profiles_auth_provider_check 
+      check (auth_provider in ('email', 'phone', 'google', 'apple'));
+  end if;
+end$$;
+
+-- Create trigger for updated_at
+drop trigger if exists set_profiles_updated_at on public.profiles;
+create trigger set_profiles_updated_at 
+  before update on public.profiles 
+  for each row execute function public.tg__update_timestamp();
+
+-- Update the handle_new_user function to support OAuth providers
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  provider text;
+  user_metadata jsonb;
+begin
+  -- Determine the auth provider
+  provider := coalesce(new.app_metadata->>'provider', 'email');
+  user_metadata := coalesce(new.raw_user_meta_data, '{}'::jsonb);
+
+  -- Insert or update profile
+  insert into public.profiles (
+    id, 
+    email, 
+    auth_provider,
+    avatar_url,
+    full_name,
+    phone,
+    last_sign_in_at
+  )
+  values (
+    new.id,
+    new.email,
+    provider,
+    user_metadata->>'avatar_url',
+    coalesce(user_metadata->>'full_name', user_metadata->>'name'),
+    new.phone,
+    new.last_sign_in_at
+  )
+  on conflict (id) do update
+    set 
+      email = excluded.email,
+      auth_provider = excluded.auth_provider,
+      avatar_url = coalesce(excluded.avatar_url, profiles.avatar_url),
+      full_name = coalesce(excluded.full_name, profiles.full_name),
+      phone = coalesce(excluded.phone, profiles.phone),
+      last_sign_in_at = excluded.last_sign_in_at,
+      updated_at = now();
+
+  return new;
+end;
+$$;
+
+-- Update trigger (ensure it exists)
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
+-- Create trigger for user updates (to sync last_sign_in_at)
+drop trigger if exists on_auth_user_updated on auth.users;
+create trigger on_auth_user_updated
+  after update on auth.users
+  for each row execute procedure public.handle_new_user();
+
+-- RPC: Get or create user profile with enhanced data
+create or replace function public.get_or_create_profile(user_id uuid)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  profile_data json;
+begin
+  -- Check if the user is accessing their own profile or is admin
+  if auth.uid() != user_id and not public.is_admin() then
+    raise exception 'Unauthorized';
+  end if;
+
+  select row_to_json(p.*)
+  into profile_data
+  from public.profiles p
+  where p.id = user_id;
+
+  if profile_data is null then
+    -- Create profile if it doesn't exist
+    insert into public.profiles (id)
+    values (user_id)
+    returning row_to_json(profiles.*) into profile_data;
+  end if;
+
+  return profile_data;
+end;
+$$;
+
+-- RPC: Update user profile
+create or replace function public.update_profile(
+  p_user_id uuid,
+  p_full_name text default null,
+  p_phone text default null,
+  p_birth_date date default null,
+  p_city text default null,
+  p_avatar_url text default null,
+  p_default_wallet_type text default null,
+  p_default_cafe_id uuid default null
+)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  updated_profile json;
+begin
+  -- Check authorization
+  if auth.uid() != p_user_id and not public.is_admin() then
+    raise exception 'Unauthorized';
+  end if;
+
+  -- Update profile
+  update public.profiles
+  set
+    full_name = coalesce(p_full_name, full_name),
+    phone = coalesce(p_phone, phone),
+    birth_date = coalesce(p_birth_date, birth_date),
+    city = coalesce(p_city, city),
+    avatar_url = coalesce(p_avatar_url, avatar_url),
+    default_wallet_type = coalesce(p_default_wallet_type, default_wallet_type),
+    default_cafe_id = coalesce(p_default_cafe_id, default_cafe_id),
+    updated_at = now()
+  where id = p_user_id
+  returning row_to_json(profiles.*) into updated_profile;
+
+  if updated_profile is null then
+    raise exception 'Profile not found';
+  end if;
+
+  return updated_profile;
+end;
+$$;
+
+-- RPC: Get user profile by email (for admin use)
+create or replace function public.get_profile_by_email(p_email text)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  profile_data json;
+begin
+  -- Only admins can search by email
+  if not public.is_admin() then
+    raise exception 'Unauthorized: Admin access required';
+  end if;
+
+  select row_to_json(p.*)
+  into profile_data
+  from public.profiles p
+  where lower(p.email) = lower(p_email);
+
+  return profile_data;
+end;
+$$;
+
+-- RPC: Deactivate user account
+create or replace function public.deactivate_account(p_user_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Users can deactivate their own account, admins can deactivate any account
+  if auth.uid() != p_user_id and not public.is_admin() then
+    raise exception 'Unauthorized';
+  end if;
+
+  update public.profiles
+  set 
+    is_active = false,
+    updated_at = now()
+  where id = p_user_id;
+
+  return found;
+end;
+$$;
+
+-- RPC: Reactivate user account (admin only)
+create or replace function public.reactivate_account(p_user_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'Unauthorized: Admin access required';
+  end if;
+
+  update public.profiles
+  set 
+    is_active = true,
+    updated_at = now()
+  where id = p_user_id;
+
+  return found;
+end;
+$$;
+
+-- Create index for better performance
+create index if not exists profiles_auth_provider_idx on public.profiles (auth_provider);
+create index if not exists profiles_is_active_idx on public.profiles (is_active);
+create index if not exists profiles_phone_idx on public.profiles (phone) where phone is not null;
+
+-- Add RLS policies for new columns (they inherit existing policies, but let's be explicit)
+-- The existing policies already cover select/update for own profile and admin access
+
+-- Grant execute permissions on new RPC functions
+grant execute on function public.get_or_create_profile(uuid) to authenticated;
+grant execute on function public.update_profile(uuid, text, text, date, text, text, text, uuid) to authenticated;
+grant execute on function public.get_profile_by_email(text) to authenticated;
+grant execute on function public.deactivate_account(uuid) to authenticated;
+grant execute on function public.reactivate_account(uuid) to authenticated;
+
+-- Comments for documentation
+comment on column public.profiles.auth_provider is 'Authentication provider: email, phone, google, apple';
+comment on column public.profiles.avatar_url is 'URL to user profile picture (from OAuth or uploaded)';
+comment on column public.profiles.last_sign_in_at is 'Timestamp of last successful sign-in';
+comment on column public.profiles.is_active is 'Account status: true = active, false = deactivated';
+comment on function public.get_or_create_profile(uuid) is 'Get or create user profile with enhanced authentication data';
+comment on function public.update_profile(uuid, text, text, date, text, text, text, uuid) is 'Update user profile information';
+comment on function public.get_profile_by_email(text) is 'Admin function to find user profile by email';
+comment on function public.deactivate_account(uuid) is 'Deactivate user account (soft delete)';
+comment on function public.reactivate_account(uuid) is 'Reactivate previously deactivated user account (admin only)';

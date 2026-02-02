@@ -1,0 +1,348 @@
+-- Migration: Order History and Reorder functionality
+-- Description: Add RPC functions for fetching user order history with pagination and reordering
+
+-- =====================================================
+-- FUNCTION: get_user_order_history
+-- Description: Get paginated order history for a user
+-- =====================================================
+CREATE OR REPLACE FUNCTION get_user_order_history(
+    p_phone TEXT,
+    p_limit INT DEFAULT 20,
+    p_offset INT DEFAULT 0
+)
+RETURNS TABLE(
+    order_id UUID,
+    cafe_id UUID,
+    cafe_name TEXT,
+    status TEXT,
+    created_at TIMESTAMPTZ,
+    scheduled_ready_at TIMESTAMPTZ,
+    subtotal_credits INT,
+    bonus_used INT,
+    paid_credits INT,
+    eta_minutes INT,
+    items JSONB
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        o.id AS order_id,
+        o.cafe_id,
+        c.name AS cafe_name,
+        o.status,
+        o.created_at,
+        o.scheduled_ready_at,
+        o.subtotal_credits,
+        o.bonus_used,
+        o.paid_credits,
+        o.eta_minutes,
+        COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'id', oi.id,
+                    'menu_item_id', oi.menu_item_id,
+                    'title', oi.title,
+                    'unit_credits', oi.unit_credits,
+                    'quantity', oi.quantity,
+                    'category', oi.category
+                )
+                ORDER BY oi.created_at
+            ) FILTER (WHERE oi.id IS NOT NULL),
+            '[]'::jsonb
+        ) AS items
+    FROM orders o
+    LEFT JOIN cafes c ON c.id = o.cafe_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.customer_phone = p_phone
+    GROUP BY 
+        o.id, 
+        o.cafe_id, 
+        c.name, 
+        o.status, 
+        o.created_at, 
+        o.scheduled_ready_at, 
+        o.subtotal_credits, 
+        o.bonus_used, 
+        o.paid_credits, 
+        o.eta_minutes
+    ORDER BY o.created_at DESC
+    LIMIT p_limit
+    OFFSET p_offset;
+END;
+$$;
+
+COMMENT ON FUNCTION get_user_order_history IS 'Get paginated order history for a user by phone number';
+
+-- =====================================================
+-- FUNCTION: reorder
+-- Description: Create a new order based on an existing order
+-- =====================================================
+CREATE OR REPLACE FUNCTION reorder(
+    p_original_order_id UUID,
+    p_scheduled_ready_at TIMESTAMPTZ DEFAULT NULL,
+    p_eta_sec INT DEFAULT NULL
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_new_order_id UUID;
+    v_original_order RECORD;
+    v_original_item RECORD;
+BEGIN
+    -- Fetch the original order
+    SELECT 
+        cafe_id,
+        customer_phone,
+        subtotal_credits,
+        bonus_used,
+        paid_credits,
+        eta_minutes
+    INTO v_original_order
+    FROM orders
+    WHERE id = p_original_order_id;
+
+    -- Check if original order exists
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Original order not found: %', p_original_order_id;
+    END IF;
+
+    -- Create new order with same details
+    INSERT INTO orders (
+        cafe_id,
+        customer_phone,
+        status,
+        subtotal_credits,
+        bonus_used,
+        paid_credits,
+        eta_minutes,
+        scheduled_ready_at,
+        eta_sec
+    )
+    VALUES (
+        v_original_order.cafe_id,
+        v_original_order.customer_phone,
+        'Created',
+        v_original_order.subtotal_credits,
+        v_original_order.bonus_used,
+        v_original_order.paid_credits,
+        v_original_order.eta_minutes,
+        p_scheduled_ready_at,
+        p_eta_sec
+    )
+    RETURNING id INTO v_new_order_id;
+
+    -- Copy order items
+    INSERT INTO order_items (
+        order_id,
+        menu_item_id,
+        title,
+        unit_credits,
+        quantity,
+        category
+    )
+    SELECT 
+        v_new_order_id,
+        menu_item_id,
+        title,
+        unit_credits,
+        quantity,
+        category
+    FROM order_items
+    WHERE order_id = p_original_order_id;
+
+    -- Create initial order event
+    INSERT INTO order_events (
+        order_id,
+        status
+    )
+    VALUES (
+        v_new_order_id,
+        'Created'
+    );
+
+    -- Log audit event
+    INSERT INTO audit_logs (
+        user_id,
+        action,
+        resource_type,
+        resource_id,
+        details
+    )
+    VALUES (
+        NULL, -- Customer orders don't have user_id yet (phone-based)
+        'reorder',
+        'order',
+        v_new_order_id,
+        jsonb_build_object(
+            'original_order_id', p_original_order_id,
+            'phone', v_original_order.customer_phone
+        )
+    );
+
+    RETURN v_new_order_id;
+END;
+$$;
+
+COMMENT ON FUNCTION reorder IS 'Create a new order by copying an existing order';
+
+-- =====================================================
+-- FUNCTION: get_order_with_items
+-- Description: Get a single order with all items and cafe details
+-- =====================================================
+CREATE OR REPLACE FUNCTION get_order_with_items(
+    p_order_id UUID
+)
+RETURNS TABLE(
+    order_id UUID,
+    cafe_id UUID,
+    cafe_name TEXT,
+    status TEXT,
+    created_at TIMESTAMPTZ,
+    scheduled_ready_at TIMESTAMPTZ,
+    pickup_deadline TIMESTAMPTZ,
+    subtotal_credits INT,
+    bonus_used INT,
+    paid_credits INT,
+    eta_minutes INT,
+    eta_sec INT,
+    customer_phone TEXT,
+    items JSONB,
+    events JSONB
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        o.id AS order_id,
+        o.cafe_id,
+        c.name AS cafe_name,
+        o.status,
+        o.created_at,
+        o.scheduled_ready_at,
+        o.pickup_deadline,
+        o.subtotal_credits,
+        o.bonus_used,
+        o.paid_credits,
+        o.eta_minutes,
+        o.eta_sec,
+        o.customer_phone,
+        COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'id', oi.id,
+                    'menu_item_id', oi.menu_item_id,
+                    'title', oi.title,
+                    'unit_credits', oi.unit_credits,
+                    'quantity', oi.quantity,
+                    'category', oi.category
+                )
+                ORDER BY oi.created_at
+            ) FILTER (WHERE oi.id IS NOT NULL),
+            '[]'::jsonb
+        ) AS items,
+        COALESCE(
+            (
+                SELECT jsonb_agg(
+                    jsonb_build_object(
+                        'id', oe.id,
+                        'status', oe.status,
+                        'created_at', oe.created_at
+                    )
+                    ORDER BY oe.created_at ASC
+                )
+                FROM order_events oe
+                WHERE oe.order_id = o.id
+            ),
+            '[]'::jsonb
+        ) AS events
+    FROM orders o
+    LEFT JOIN cafes c ON c.id = o.cafe_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.id = p_order_id
+    GROUP BY 
+        o.id, 
+        o.cafe_id, 
+        c.name, 
+        o.status, 
+        o.created_at, 
+        o.scheduled_ready_at, 
+        o.pickup_deadline, 
+        o.subtotal_credits, 
+        o.bonus_used, 
+        o.paid_credits, 
+        o.eta_minutes, 
+        o.eta_sec, 
+        o.customer_phone;
+END;
+$$;
+
+COMMENT ON FUNCTION get_order_with_items IS 'Get complete order details with items and events';
+
+-- =====================================================
+-- FUNCTION: get_order_statistics
+-- Description: Get statistics about user's order history
+-- =====================================================
+CREATE OR REPLACE FUNCTION get_order_statistics(
+    p_phone TEXT
+)
+RETURNS TABLE(
+    total_orders INT,
+    completed_orders INT,
+    total_spent_credits INT,
+    favorite_cafe_id UUID,
+    favorite_cafe_name TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH order_stats AS (
+        SELECT 
+            COUNT(*) AS total_orders,
+            COUNT(*) FILTER (WHERE status IN ('Issued', 'Picked up')) AS completed_orders,
+            SUM(paid_credits) AS total_spent_credits
+        FROM orders
+        WHERE customer_phone = p_phone
+    ),
+    favorite_cafe AS (
+        SELECT 
+            o.cafe_id,
+            c.name AS cafe_name,
+            COUNT(*) AS visit_count
+        FROM orders o
+        LEFT JOIN cafes c ON c.id = o.cafe_id
+        WHERE o.customer_phone = p_phone
+        GROUP BY o.cafe_id, c.name
+        ORDER BY visit_count DESC
+        LIMIT 1
+    )
+    SELECT 
+        COALESCE(os.total_orders::INT, 0),
+        COALESCE(os.completed_orders::INT, 0),
+        COALESCE(os.total_spent_credits::INT, 0),
+        fc.cafe_id,
+        fc.cafe_name
+    FROM order_stats os
+    LEFT JOIN favorite_cafe fc ON true;
+END;
+$$;
+
+COMMENT ON FUNCTION get_order_statistics IS 'Get statistics about user order history';
+
+-- Grant execute permissions to authenticated users
+GRANT EXECUTE ON FUNCTION get_user_order_history TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION reorder TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION get_order_with_items TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION get_order_statistics TO authenticated, anon;

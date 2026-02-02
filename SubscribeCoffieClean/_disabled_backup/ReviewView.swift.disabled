@@ -1,0 +1,390 @@
+import SwiftUI
+
+// MARK: - Submit Review View
+struct SubmitReviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var socialService = SocialService()
+    
+    let cafeId: UUID?
+    let menuItemId: UUID?
+    let orderId: UUID?
+    let cafeName: String?
+    let itemName: String?
+    
+    @State private var rating: Int = 5
+    @State private var comment: String = ""
+    @State private var isSubmitting = false
+    @State private var showError = false
+    @State private var errorMessage = ""
+    @State private var showSuccess = false
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 24) {
+                    // Header
+                    VStack(spacing: 8) {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 40))
+                            .foregroundColor(.yellow)
+                        
+                        Text("Оставьте отзыв")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        if let name = itemName ?? cafeName {
+                            Text(name)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        if orderId != nil {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(.green)
+                                Text("Подтверждённая покупка")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+                    .padding(.top)
+                    
+                    // Rating
+                    VStack(spacing: 12) {
+                        Text("Ваша оценка")
+                            .font(.headline)
+                        
+                        HStack(spacing: 12) {
+                            ForEach(1...5, id: \.self) { star in
+                                Button {
+                                    rating = star
+                                } label: {
+                                    Image(systemName: star <= rating ? "star.fill" : "star")
+                                        .font(.system(size: 36))
+                                        .foregroundColor(star <= rating ? .yellow : .gray.opacity(0.3))
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Comment
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Ваш отзыв")
+                            .font(.headline)
+                        
+                        TextEditor(text: $comment)
+                            .frame(minHeight: 120)
+                            .padding(8)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                            )
+                        
+                        Text("\(comment.count)/500 символов")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    // Submit Button
+                    Button {
+                        Task { await submitReview() }
+                    } label: {
+                        HStack {
+                            if isSubmitting {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            } else {
+                                Text("Отправить отзыв")
+                                    .fontWeight(.semibold)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(isSubmitButtonEnabled ? Color.blue : Color.gray)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                    .disabled(!isSubmitButtonEnabled || isSubmitting)
+                    
+                    Spacer()
+                }
+                .padding()
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+            }
+            .alert("Ошибка", isPresented: $showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage)
+            }
+            .alert("Спасибо!", isPresented: $showSuccess) {
+                Button("OK") {
+                    dismiss()
+                }
+            } message: {
+                Text("Ваш отзыв успешно отправлен")
+            }
+        }
+    }
+    
+    private var isSubmitButtonEnabled: Bool {
+        rating > 0 && !isSubmitting
+    }
+    
+    private func submitReview() async {
+        isSubmitting = true
+        
+        do {
+            let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = try await socialService.submitReview(
+                cafeId: cafeId,
+                menuItemId: menuItemId,
+                orderId: orderId,
+                rating: rating,
+                comment: trimmedComment.isEmpty ? nil : trimmedComment
+            )
+            
+            showSuccess = true
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+        
+        isSubmitting = false
+    }
+}
+
+// MARK: - Cafe Reviews List View
+struct CafeReviewsView: View {
+    let cafeId: UUID
+    let cafeName: String
+    
+    @StateObject private var socialService = SocialService()
+    @State private var reviewsSummary: CafeReviewsSummary?
+    @State private var isLoading = true
+    @State private var showError = false
+    @State private var errorMessage = ""
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                // Summary Header
+                if let summary = reviewsSummary {
+                    VStack(spacing: 12) {
+                        // Average Rating
+                        HStack(spacing: 8) {
+                            Text(String(format: "%.1f", summary.averageRating ?? 0))
+                                .font(.system(size: 48, weight: .bold))
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 2) {
+                                    ForEach(1...5, id: \.self) { star in
+                                        Image(systemName: "star.fill")
+                                            .foregroundColor(Double(star) <= (summary.averageRating ?? 0) ? .yellow : .gray.opacity(0.3))
+                                            .font(.system(size: 16))
+                                    }
+                                }
+                                
+                                Text("\(summary.totalReviews) отзывов")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(16)
+                    }
+                    .padding(.horizontal)
+                    
+                    // Reviews List
+                    LazyVStack(spacing: 16) {
+                        ForEach(summary.reviews) { review in
+                            ReviewCardView(review: review)
+                                .padding(.horizontal)
+                        }
+                    }
+                } else if isLoading {
+                    ProgressView()
+                        .padding()
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "star.slash")
+                            .font(.system(size: 48))
+                            .foregroundColor(.gray)
+                        
+                        Text("Пока нет отзывов")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        
+                        Text("Будьте первым, кто оставит отзыв!")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                }
+            }
+            .padding(.vertical)
+        }
+        .navigationTitle("Отзывы")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await loadReviews()
+        }
+        .refreshable {
+            await loadReviews()
+        }
+        .alert("Ошибка", isPresented: $showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
+    }
+    
+    private func loadReviews() async {
+        isLoading = true
+        
+        do {
+            reviewsSummary = try await socialService.getCafeReviews(cafeId: cafeId)
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+        
+        isLoading = false
+    }
+}
+
+// MARK: - Review Card View
+struct ReviewCardView: View {
+    let review: ReviewWithUser
+    @StateObject private var socialService = SocialService()
+    
+    @State private var hasMarkedHelpful = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack {
+                // User Avatar Placeholder
+                Circle()
+                    .fill(Color.blue.opacity(0.2))
+                    .frame(width: 40, height: 40)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .foregroundColor(.blue)
+                    )
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("Пользователь")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        
+                        if review.isVerifiedPurchase {
+                            HStack(spacing: 2) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.caption2)
+                                Text("Проверено")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(.green)
+                        }
+                    }
+                    
+                    Text(review.createdAt, style: .relative)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                // Rating
+                HStack(spacing: 2) {
+                    ForEach(1...5, id: \.self) { star in
+                        Image(systemName: "star.fill")
+                            .foregroundColor(star <= review.rating ? .yellow : .gray.opacity(0.3))
+                            .font(.system(size: 14))
+                    }
+                }
+            }
+            
+            // Comment
+            if let comment = review.comment {
+                Text(comment)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            
+            // Photos
+            if let photos = review.photos, !photos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(photos, id: \.self) { photoUrl in
+                            AsyncImage(url: URL(string: photoUrl)) { image in
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } placeholder: {
+                                Rectangle()
+                                    .fill(Color.gray.opacity(0.2))
+                            }
+                            .frame(width: 100, height: 100)
+                            .cornerRadius(8)
+                        }
+                    }
+                }
+            }
+            
+            // Helpful Button
+            HStack {
+                Button {
+                    Task { await markAsHelpful() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: hasMarkedHelpful ? "hand.thumbsup.fill" : "hand.thumbsup")
+                        Text("Полезно")
+                        Text("(\(review.helpfulCount))")
+                            .foregroundColor(.secondary)
+                    }
+                    .font(.caption)
+                    .foregroundColor(hasMarkedHelpful ? .blue : .secondary)
+                }
+                .disabled(hasMarkedHelpful)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    private func markAsHelpful() async {
+        do {
+            try await socialService.markReviewHelpful(reviewId: review.reviewId, isHelpful: true)
+            hasMarkedHelpful = true
+        } catch {
+            Logger.error("Failed to mark review as helpful: \(error)")
+        }
+    }
+}
+
+// MARK: - Preview
+#Preview {
+    SubmitReviewView(
+        cafeId: UUID(),
+        menuItemId: nil,
+        orderId: UUID(),
+        cafeName: "Кофейня",
+        itemName: nil
+    )
+}

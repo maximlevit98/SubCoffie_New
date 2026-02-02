@@ -1,0 +1,456 @@
+import SwiftUI
+import MapKit
+
+struct CourierDeliveryDetailView: View {
+    let delivery: ActiveDeliveryDetail
+    
+    @StateObject private var viewModel: CourierDeliveryDetailViewModel
+    @Environment(\.dismiss) private var dismiss
+    
+    init(delivery: ActiveDeliveryDetail) {
+        self.delivery = delivery
+        _viewModel = StateObject(wrappedValue: CourierDeliveryDetailViewModel(delivery: delivery))
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                // Map
+                mapSection
+                
+                // Current status
+                statusCard
+                
+                // Cafe info
+                locationCard(
+                    title: "Кафе",
+                    icon: "building.2.fill",
+                    name: delivery.cafeName,
+                    address: delivery.cafeAddress,
+                    location: delivery.cafeLocation,
+                    color: .blue
+                )
+                
+                // Delivery address
+                locationCard(
+                    title: "Адрес доставки",
+                    icon: "mappin.circle.fill",
+                    name: "Клиент",
+                    address: delivery.deliveryAddress,
+                    location: delivery.deliveryLocation,
+                    color: .green,
+                    showCall: true
+                )
+                
+                // Delivery instructions
+                if let instructions = delivery.deliveryInstructions, !instructions.isEmpty {
+                    instructionsCard(instructions: instructions)
+                }
+                
+                // Order details
+                orderDetailsCard
+                
+                // Action buttons
+                actionButtons
+            }
+            .padding()
+        }
+        .navigationTitle("Заказ #\(delivery.orderId.uuidString.prefix(8))")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Ошибка", isPresented: $viewModel.showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.errorMessage)
+        }
+        .alert("Подтверждение", isPresented: $viewModel.showConfirmation) {
+            Button("Отмена", role: .cancel) {}
+            Button("Подтвердить") {
+                Task {
+                    await viewModel.confirmAction()
+                }
+            }
+        } message: {
+            Text(viewModel.confirmationMessage)
+        }
+    }
+    
+    // MARK: - Map Section
+    private var mapSection: some View {
+        Map(coordinateRegion: $viewModel.region, annotationItems: mapAnnotations) { item in
+            MapAnnotation(coordinate: item.coordinate) {
+                VStack {
+                    Image(systemName: item.icon)
+                        .font(.title2)
+                        .foregroundColor(.white)
+                        .padding(10)
+                        .background(Color(item.color))
+                        .clipShape(Circle())
+                        .shadow(radius: 4)
+                    
+                    Text(item.title)
+                        .font(.caption)
+                        .padding(4)
+                        .background(Color.white)
+                        .cornerRadius(4)
+                        .shadow(radius: 2)
+                }
+            }
+        }
+        .frame(height: 250)
+        .cornerRadius(12)
+    }
+    
+    private var mapAnnotations: [MapAnnotationItem] {
+        var items: [MapAnnotationItem] = []
+        
+        // Cafe
+        items.append(MapAnnotationItem(
+            id: "cafe",
+            coordinate: delivery.cafeLocation,
+            icon: "building.2.fill",
+            title: "Кафе",
+            color: "blue"
+        ))
+        
+        // Delivery location
+        items.append(MapAnnotationItem(
+            id: "delivery",
+            coordinate: delivery.deliveryLocation,
+            icon: "house.fill",
+            title: "Клиент",
+            color: "green"
+        ))
+        
+        return items
+    }
+    
+    // MARK: - Status Card
+    private var statusCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: delivery.deliveryStatus.icon)
+                    .font(.title2)
+                    .foregroundColor(Color(delivery.deliveryStatus.color))
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Текущий статус")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(delivery.deliveryStatus.displayName)
+                        .font(.headline)
+                }
+                
+                Spacer()
+                
+                if let time = delivery.estimatedTime {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Осталось")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("~\(time) мин")
+                            .font(.headline)
+                    }
+                }
+            }
+            
+            ProgressView(value: delivery.deliveryStatus.progressValue)
+                .tint(Color(delivery.deliveryStatus.color))
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Location Card
+    private func locationCard(
+        title: String,
+        icon: String,
+        name: String,
+        address: String,
+        location: CLLocationCoordinate2D,
+        color: Color,
+        showCall: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                Spacer()
+                if showCall {
+                    Button(action: {
+                        if let url = URL(string: "tel://\(delivery.customerPhone)") {
+                            UIApplication.shared.open(url)
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "phone.fill")
+                            Text("Позвонить")
+                        }
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.green)
+                        .cornerRadius(8)
+                    }
+                }
+            }
+            
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundColor(color)
+                    .frame(width: 40)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(name)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Text(address)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    openMaps(location: location, name: name)
+                }) {
+                    Image(systemName: "arrow.triangle.turn.up.right.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.blue)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Instructions Card
+    private func instructionsCard(instructions: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Инструкции для доставки", systemImage: "note.text")
+                .font(.headline)
+            
+            Text(instructions)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.systemBackground))
+                .cornerRadius(8)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Order Details Card
+    private var orderDetailsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Детали заказа")
+                .font(.headline)
+            
+            HStack {
+                Text("Номер заказа:")
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("#\(delivery.orderId.uuidString.prefix(8))")
+                    .fontWeight(.medium)
+            }
+            .font(.subheadline)
+            
+            HStack {
+                Text("Сумма заказа:")
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(String(format: "%.0f ₽", Double(delivery.orderTotal) / 100.0))
+                    .fontWeight(.medium)
+            }
+            .font(.subheadline)
+            
+            HStack {
+                Text("Создан:")
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(delivery.createdAt, style: .time)
+                    .fontWeight(.medium)
+            }
+            .font(.subheadline)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Action Buttons
+    private var actionButtons: some View {
+        VStack(spacing: 12) {
+            if delivery.deliveryStatus == .assigned {
+                Button(action: {
+                    viewModel.prepareStatusUpdate(.courierOnWayToCafe, message: "Отправиться в кафе?")
+                }) {
+                    actionButtonContent(
+                        icon: "arrow.right.circle.fill",
+                        title: "Еду в кафе",
+                        color: .blue
+                    )
+                }
+            }
+            
+            if delivery.deliveryStatus == .courierOnWayToCafe {
+                Button(action: {
+                    viewModel.prepareStatusUpdate(.pickedUp, message: "Подтвердить получение заказа?")
+                }) {
+                    actionButtonContent(
+                        icon: "checkmark.circle.fill",
+                        title: "Заказ получен",
+                        color: .green
+                    )
+                }
+            }
+            
+            if delivery.deliveryStatus == .pickedUp {
+                Button(action: {
+                    viewModel.prepareStatusUpdate(.onWayToCustomer, message: "Отправиться к клиенту?")
+                }) {
+                    actionButtonContent(
+                        icon: "shippingbox.fill",
+                        title: "Еду к клиенту",
+                        color: .purple
+                    )
+                }
+            }
+            
+            if delivery.deliveryStatus == .onWayToCustomer {
+                Button(action: {
+                    viewModel.prepareStatusUpdate(.delivered, message: "Подтвердить доставку?")
+                }) {
+                    actionButtonContent(
+                        icon: "checkmark.circle.fill",
+                        title: "Заказ доставлен",
+                        color: .green
+                    )
+                }
+            }
+            
+            // Problem button
+            if delivery.deliveryStatus != .delivered && delivery.deliveryStatus != .failed {
+                Button(action: {
+                    viewModel.showProblemAlert()
+                }) {
+                    actionButtonContent(
+                        icon: "exclamationmark.triangle.fill",
+                        title: "Возникла проблема",
+                        color: .red
+                    )
+                }
+            }
+        }
+    }
+    
+    private func actionButtonContent(icon: String, title: String, color: Color) -> some View {
+        HStack {
+            Image(systemName: icon)
+            Text(title)
+                .fontWeight(.semibold)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(color)
+        .foregroundColor(.white)
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Helper Functions
+    private func openMaps(location: CLLocationCoordinate2D, name: String) {
+        let mapItem = MKMapItem(placemark: MKPlacemark(coordinate: location))
+        mapItem.name = name
+        mapItem.openInMaps(launchOptions: [
+            MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving
+        ])
+    }
+}
+
+// MARK: - View Model
+@MainActor
+class CourierDeliveryDetailViewModel: ObservableObject {
+    @Published var region: MKCoordinateRegion
+    @Published var showError = false
+    @Published var errorMessage = ""
+    @Published var showConfirmation = false
+    @Published var confirmationMessage = ""
+    
+    private let delivery: ActiveDeliveryDetail
+    private var pendingStatus: DeliveryStatus?
+    
+    init(delivery: ActiveDeliveryDetail) {
+        self.delivery = delivery
+        
+        // Calculate region to show both cafe and delivery location
+        let centerLat = (delivery.cafeLocation.latitude + delivery.deliveryLocation.latitude) / 2
+        let centerLon = (delivery.cafeLocation.longitude + delivery.deliveryLocation.longitude) / 2
+        
+        let latDelta = abs(delivery.cafeLocation.latitude - delivery.deliveryLocation.latitude) * 1.5
+        let lonDelta = abs(delivery.cafeLocation.longitude - delivery.deliveryLocation.longitude) * 1.5
+        
+        self.region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon),
+            span: MKCoordinateSpan(
+                latitudeDelta: max(latDelta, 0.01),
+                longitudeDelta: max(lonDelta, 0.01)
+            )
+        )
+    }
+    
+    func prepareStatusUpdate(_ newStatus: DeliveryStatus, message: String) {
+        pendingStatus = newStatus
+        confirmationMessage = message
+        showConfirmation = true
+    }
+    
+    func confirmAction() async {
+        guard let newStatus = pendingStatus else { return }
+        
+        do {
+            try await DeliveryService.shared.updateDeliveryStatus(
+                deliveryOrderId: delivery.deliveryId,
+                newStatus: newStatus
+            )
+            
+            // In a real app, you might navigate back or refresh
+            pendingStatus = nil
+        } catch {
+            errorMessage = "Не удалось обновить статус: \(error.localizedDescription)"
+            showError = true
+        }
+    }
+    
+    func showProblemAlert() {
+        errorMessage = "Свяжитесь с поддержкой для решения проблемы"
+        showError = true
+    }
+}
+
+#Preview {
+    NavigationView {
+        CourierDeliveryDetailView(
+            delivery: ActiveDeliveryDetail(
+                deliveryId: UUID(),
+                orderId: UUID(),
+                cafeName: "Coffee House",
+                cafeAddress: "ул. Тверская, 10",
+                cafeLocation: CLLocationCoordinate2D(latitude: 55.7558, longitude: 37.6173),
+                deliveryAddress: "ул. Арбат, 20, кв. 5",
+                deliveryLocation: CLLocationCoordinate2D(latitude: 55.7539, longitude: 37.5984),
+                deliveryStatus: .assigned,
+                estimatedTime: 25,
+                customerPhone: "+7 999 123 4567",
+                deliveryInstructions: "Домофон 123, 5 этаж",
+                orderTotal: 45000,
+                createdAt: Date()
+            )
+        )
+    }
+}

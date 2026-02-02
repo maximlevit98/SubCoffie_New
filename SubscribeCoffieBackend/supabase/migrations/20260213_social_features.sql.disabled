@@ -1,0 +1,460 @@
+-- Migration: Social features (reviews, favorites, friends, group orders)
+-- Description: Enable social interactions between users
+
+-- ============================================
+-- USER REVIEWS
+-- ============================================
+
+CREATE TABLE user_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    cafe_id UUID REFERENCES cafes(id) ON DELETE CASCADE,
+    menu_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+    order_id UUID REFERENCES orders(id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    comment TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- Either cafe_id or menu_item_id must be set
+    CONSTRAINT review_target_check CHECK (
+        (cafe_id IS NOT NULL AND menu_item_id IS NULL) OR
+        (cafe_id IS NULL AND menu_item_id IS NOT NULL)
+    ),
+    
+    -- User can only review once per cafe or menu item
+    CONSTRAINT unique_user_cafe_review UNIQUE (user_id, cafe_id),
+    CONSTRAINT unique_user_menu_item_review UNIQUE (user_id, menu_item_id)
+);
+
+CREATE INDEX idx_user_reviews_user_id ON user_reviews(user_id);
+CREATE INDEX idx_user_reviews_cafe_id ON user_reviews(cafe_id);
+CREATE INDEX idx_user_reviews_menu_item_id ON user_reviews(menu_item_id);
+CREATE INDEX idx_user_reviews_rating ON user_reviews(rating);
+
+-- RLS policies for reviews
+ALTER TABLE user_reviews ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view all reviews"
+    ON user_reviews FOR SELECT
+    USING (true);
+
+CREATE POLICY "Users can create their own reviews"
+    ON user_reviews FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own reviews"
+    ON user_reviews FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own reviews"
+    ON user_reviews FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- ============================================
+-- USER FAVORITES
+-- ============================================
+
+CREATE TABLE user_favorites (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    cafe_id UUID REFERENCES cafes(id) ON DELETE CASCADE,
+    menu_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- Either cafe_id or menu_item_id must be set
+    CONSTRAINT favorite_target_check CHECK (
+        (cafe_id IS NOT NULL AND menu_item_id IS NULL) OR
+        (cafe_id IS NULL AND menu_item_id IS NOT NULL)
+    ),
+    
+    -- User can only favorite once per cafe or menu item
+    CONSTRAINT unique_user_cafe_favorite UNIQUE (user_id, cafe_id),
+    CONSTRAINT unique_user_menu_item_favorite UNIQUE (user_id, menu_item_id)
+);
+
+CREATE INDEX idx_user_favorites_user_id ON user_favorites(user_id);
+CREATE INDEX idx_user_favorites_cafe_id ON user_favorites(cafe_id);
+CREATE INDEX idx_user_favorites_menu_item_id ON user_favorites(menu_item_id);
+
+-- RLS policies for favorites
+ALTER TABLE user_favorites ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own favorites"
+    ON user_favorites FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create their own favorites"
+    ON user_favorites FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own favorites"
+    ON user_favorites FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- ============================================
+-- USER FRIENDS
+-- ============================================
+
+CREATE TABLE user_friends (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    friend_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'blocked')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- User cannot be friends with themselves
+    CONSTRAINT not_self_friend CHECK (user_id != friend_user_id),
+    
+    -- Unique friendship
+    CONSTRAINT unique_friendship UNIQUE (user_id, friend_user_id)
+);
+
+CREATE INDEX idx_user_friends_user_id ON user_friends(user_id);
+CREATE INDEX idx_user_friends_friend_user_id ON user_friends(friend_user_id);
+CREATE INDEX idx_user_friends_status ON user_friends(status);
+
+-- RLS policies for friends
+ALTER TABLE user_friends ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own friendships"
+    ON user_friends FOR SELECT
+    USING (auth.uid() = user_id OR auth.uid() = friend_user_id);
+
+CREATE POLICY "Users can create friend requests"
+    ON user_friends FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update friendships they're part of"
+    ON user_friends FOR UPDATE
+    USING (auth.uid() = user_id OR auth.uid() = friend_user_id);
+
+CREATE POLICY "Users can delete their own friendships"
+    ON user_friends FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- ============================================
+-- SHARED ORDERS (Group Orders)
+-- ============================================
+
+CREATE TABLE shared_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    creator_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    participant_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    contribution_amount INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'paid', 'cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- Creator cannot be participant
+    CONSTRAINT not_self_participant CHECK (creator_user_id != participant_user_id),
+    
+    -- Unique participation in order
+    CONSTRAINT unique_order_participant UNIQUE (order_id, participant_user_id)
+);
+
+CREATE INDEX idx_shared_orders_order_id ON shared_orders(order_id);
+CREATE INDEX idx_shared_orders_creator_user_id ON shared_orders(creator_user_id);
+CREATE INDEX idx_shared_orders_participant_user_id ON shared_orders(participant_user_id);
+CREATE INDEX idx_shared_orders_status ON shared_orders(status);
+
+-- RLS policies for shared orders
+ALTER TABLE shared_orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view shared orders they're part of"
+    ON shared_orders FOR SELECT
+    USING (auth.uid() = creator_user_id OR auth.uid() = participant_user_id);
+
+CREATE POLICY "Order creators can create shared orders"
+    ON shared_orders FOR INSERT
+    WITH CHECK (auth.uid() = creator_user_id);
+
+CREATE POLICY "Participants can update their own participation"
+    ON shared_orders FOR UPDATE
+    USING (auth.uid() = participant_user_id);
+
+CREATE POLICY "Creators can delete shared orders"
+    ON shared_orders FOR DELETE
+    USING (auth.uid() = creator_user_id);
+
+-- ============================================
+-- RPC FUNCTIONS
+-- ============================================
+
+-- Submit a review
+CREATE OR REPLACE FUNCTION submit_review(
+    p_cafe_id UUID DEFAULT NULL,
+    p_menu_item_id UUID DEFAULT NULL,
+    p_order_id UUID DEFAULT NULL,
+    p_rating INTEGER,
+    p_comment TEXT DEFAULT NULL
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_review_id UUID;
+    v_result JSON;
+BEGIN
+    -- Get current user
+    v_user_id := auth.uid();
+    
+    IF v_user_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Not authenticated');
+    END IF;
+    
+    -- Validate input
+    IF p_cafe_id IS NULL AND p_menu_item_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Must specify either cafe_id or menu_item_id');
+    END IF;
+    
+    IF p_rating < 1 OR p_rating > 5 THEN
+        RETURN json_build_object('success', false, 'error', 'Rating must be between 1 and 5');
+    END IF;
+    
+    -- Insert or update review
+    INSERT INTO user_reviews (user_id, cafe_id, menu_item_id, order_id, rating, comment)
+    VALUES (v_user_id, p_cafe_id, p_menu_item_id, p_order_id, p_rating, p_comment)
+    ON CONFLICT (user_id, cafe_id) 
+    DO UPDATE SET rating = p_rating, comment = p_comment, updated_at = NOW()
+    RETURNING id INTO v_review_id;
+    
+    -- If no conflict on cafe_id, try menu_item_id
+    IF v_review_id IS NULL THEN
+        INSERT INTO user_reviews (user_id, cafe_id, menu_item_id, order_id, rating, comment)
+        VALUES (v_user_id, p_cafe_id, p_menu_item_id, p_order_id, p_rating, p_comment)
+        ON CONFLICT (user_id, menu_item_id) 
+        DO UPDATE SET rating = p_rating, comment = p_comment, updated_at = NOW()
+        RETURNING id INTO v_review_id;
+    END IF;
+    
+    v_result := json_build_object(
+        'success', true,
+        'review_id', v_review_id,
+        'message', 'Review submitted successfully'
+    );
+    
+    RETURN v_result;
+END;
+$$;
+
+-- Toggle favorite (add or remove)
+CREATE OR REPLACE FUNCTION toggle_favorite(
+    p_cafe_id UUID DEFAULT NULL,
+    p_menu_item_id UUID DEFAULT NULL
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_favorite_id UUID;
+    v_is_favorited BOOLEAN;
+    v_result JSON;
+BEGIN
+    -- Get current user
+    v_user_id := auth.uid();
+    
+    IF v_user_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Not authenticated');
+    END IF;
+    
+    -- Validate input
+    IF p_cafe_id IS NULL AND p_menu_item_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Must specify either cafe_id or menu_item_id');
+    END IF;
+    
+    -- Check if already favorited
+    IF p_cafe_id IS NOT NULL THEN
+        SELECT id INTO v_favorite_id FROM user_favorites
+        WHERE user_id = v_user_id AND cafe_id = p_cafe_id;
+    ELSE
+        SELECT id INTO v_favorite_id FROM user_favorites
+        WHERE user_id = v_user_id AND menu_item_id = p_menu_item_id;
+    END IF;
+    
+    IF v_favorite_id IS NOT NULL THEN
+        -- Remove favorite
+        DELETE FROM user_favorites WHERE id = v_favorite_id;
+        v_is_favorited := false;
+    ELSE
+        -- Add favorite
+        INSERT INTO user_favorites (user_id, cafe_id, menu_item_id)
+        VALUES (v_user_id, p_cafe_id, p_menu_item_id)
+        RETURNING id INTO v_favorite_id;
+        v_is_favorited := true;
+    END IF;
+    
+    v_result := json_build_object(
+        'success', true,
+        'is_favorited', v_is_favorited,
+        'favorite_id', v_favorite_id
+    );
+    
+    RETURN v_result;
+END;
+$$;
+
+-- Invite friend to order (split bill)
+CREATE OR REPLACE FUNCTION invite_friend_to_order(
+    p_order_id UUID,
+    p_friend_user_id UUID,
+    p_contribution_amount INTEGER DEFAULT 0
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_order_exists BOOLEAN;
+    v_shared_order_id UUID;
+    v_result JSON;
+BEGIN
+    -- Get current user
+    v_user_id := auth.uid();
+    
+    IF v_user_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Not authenticated');
+    END IF;
+    
+    -- Check if order exists and belongs to user
+    SELECT EXISTS(
+        SELECT 1 FROM orders 
+        WHERE id = p_order_id AND user_id = v_user_id
+    ) INTO v_order_exists;
+    
+    IF NOT v_order_exists THEN
+        RETURN json_build_object('success', false, 'error', 'Order not found or access denied');
+    END IF;
+    
+    -- Create shared order invitation
+    INSERT INTO shared_orders (order_id, creator_user_id, participant_user_id, contribution_amount)
+    VALUES (p_order_id, v_user_id, p_friend_user_id, p_contribution_amount)
+    RETURNING id INTO v_shared_order_id;
+    
+    v_result := json_build_object(
+        'success', true,
+        'shared_order_id', v_shared_order_id,
+        'message', 'Friend invited to order'
+    );
+    
+    RETURN v_result;
+END;
+$$;
+
+-- Get user's reviews
+CREATE OR REPLACE FUNCTION get_user_reviews(p_user_id UUID)
+RETURNS TABLE (
+    review_id UUID,
+    cafe_id UUID,
+    cafe_name TEXT,
+    menu_item_id UUID,
+    menu_item_name TEXT,
+    rating INTEGER,
+    comment TEXT,
+    created_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        ur.id,
+        ur.cafe_id,
+        c.name,
+        ur.menu_item_id,
+        mi.name,
+        ur.rating,
+        ur.comment,
+        ur.created_at
+    FROM user_reviews ur
+    LEFT JOIN cafes c ON ur.cafe_id = c.id
+    LEFT JOIN menu_items mi ON ur.menu_item_id = mi.id
+    WHERE ur.user_id = p_user_id
+    ORDER BY ur.created_at DESC;
+END;
+$$;
+
+-- Get cafe reviews with ratings
+CREATE OR REPLACE FUNCTION get_cafe_reviews(p_cafe_id UUID)
+RETURNS TABLE (
+    review_id UUID,
+    user_id UUID,
+    rating INTEGER,
+    comment TEXT,
+    created_at TIMESTAMPTZ,
+    average_rating NUMERIC
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_avg_rating NUMERIC;
+BEGIN
+    -- Calculate average rating
+    SELECT AVG(rating)::NUMERIC(3,2) INTO v_avg_rating
+    FROM user_reviews
+    WHERE cafe_id = p_cafe_id;
+    
+    RETURN QUERY
+    SELECT 
+        ur.id,
+        ur.user_id,
+        ur.rating,
+        ur.comment,
+        ur.created_at,
+        v_avg_rating
+    FROM user_reviews ur
+    WHERE ur.cafe_id = p_cafe_id
+    ORDER BY ur.created_at DESC;
+END;
+$$;
+
+-- Get user's favorites
+CREATE OR REPLACE FUNCTION get_user_favorites(p_user_id UUID)
+RETURNS TABLE (
+    favorite_id UUID,
+    cafe_id UUID,
+    cafe_name TEXT,
+    menu_item_id UUID,
+    menu_item_name TEXT,
+    created_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        uf.id,
+        uf.cafe_id,
+        c.name,
+        uf.menu_item_id,
+        mi.name,
+        uf.created_at
+    FROM user_favorites uf
+    LEFT JOIN cafes c ON uf.cafe_id = c.id
+    LEFT JOIN menu_items mi ON uf.menu_item_id = mi.id
+    WHERE uf.user_id = p_user_id
+    ORDER BY uf.created_at DESC;
+END;
+$$;
+
+-- Grant permissions
+GRANT EXECUTE ON FUNCTION submit_review TO authenticated;
+GRANT EXECUTE ON FUNCTION toggle_favorite TO authenticated;
+GRANT EXECUTE ON FUNCTION invite_friend_to_order TO authenticated;
+GRANT EXECUTE ON FUNCTION get_user_reviews TO authenticated;
+GRANT EXECUTE ON FUNCTION get_cafe_reviews TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION get_user_favorites TO authenticated;
+
+-- Comments
+COMMENT ON TABLE user_reviews IS 'User reviews for cafes and menu items';
+COMMENT ON TABLE user_favorites IS 'User favorite cafes and menu items';
+COMMENT ON TABLE user_friends IS 'User friendships and friend requests';
+COMMENT ON TABLE shared_orders IS 'Shared orders for split billing';

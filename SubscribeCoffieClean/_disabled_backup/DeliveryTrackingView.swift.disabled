@@ -1,0 +1,530 @@
+import SwiftUI
+import MapKit
+
+struct DeliveryTrackingView: View {
+    let orderId: UUID
+    @State private var delivery: DeliveryOrder?
+    @State private var courier: Courier?
+    @State private var isLoading = true
+    @State private var error: String?
+    @State private var showRatingSheet = false
+    @State private var rating: Int = 5
+    @State private var feedback: String = ""
+    
+    @State private var region = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 55.7558, longitude: 37.6173),
+        span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+    )
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                if isLoading {
+                    ProgressView("Загрузка информации о доставке...")
+                        .padding()
+                } else if let error = error {
+                    ErrorView(message: error) {
+                        Task {
+                            await loadDeliveryInfo()
+                        }
+                    }
+                } else if let delivery = delivery {
+                    // Map with courier location
+                    mapSection(delivery: delivery)
+                    
+                    // Delivery status
+                    statusSection(delivery: delivery)
+                    
+                    // Courier info
+                    if let courier = courier {
+                        courierInfoSection(courier: courier)
+                    }
+                    
+                    // Delivery details
+                    deliveryDetailsSection(delivery: delivery)
+                    
+                    // Actions
+                    if delivery.deliveryStatus == .delivered && delivery.customerRating == nil {
+                        Button(action: {
+                            showRatingSheet = true
+                        }) {
+                            Text("Оценить доставку")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.blue)
+                                .cornerRadius(12)
+                        }
+                        .padding(.horizontal)
+                    }
+                }
+            }
+            .padding(.vertical)
+        }
+        .navigationTitle("Отслеживание доставки")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await loadDeliveryInfo()
+        }
+        .sheet(isPresented: $showRatingSheet) {
+            ratingSheet
+        }
+    }
+    
+    // MARK: - Map Section
+    private func mapSection(delivery: DeliveryOrder) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Карта доставки")
+                .font(.headline)
+                .padding(.horizontal)
+            
+            Map(coordinateRegion: $region, annotationItems: annotations(delivery: delivery)) { item in
+                MapAnnotation(coordinate: item.coordinate) {
+                    VStack {
+                        Image(systemName: item.icon)
+                            .font(.title2)
+                            .foregroundColor(.white)
+                            .padding(10)
+                            .background(Color(item.color))
+                            .clipShape(Circle())
+                            .shadow(radius: 4)
+                        
+                        Text(item.title)
+                            .font(.caption)
+                            .padding(4)
+                            .background(Color.white)
+                            .cornerRadius(4)
+                            .shadow(radius: 2)
+                    }
+                }
+            }
+            .frame(height: 300)
+            .cornerRadius(12)
+            .padding(.horizontal)
+        }
+    }
+    
+    // MARK: - Status Section
+    private func statusSection(delivery: DeliveryOrder) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: delivery.deliveryStatus.icon)
+                    .font(.title2)
+                    .foregroundColor(Color(delivery.deliveryStatus.color))
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(delivery.deliveryStatus.displayName)
+                        .font(.headline)
+                    
+                    if let estimatedTime = delivery.estimatedDeliveryTime,
+                       delivery.deliveryStatus != .delivered {
+                        Text("Примерно \(estimatedTime) мин")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .background(Color(.systemGray6))
+            .cornerRadius(12)
+            
+            // Progress bar
+            ProgressView(value: delivery.deliveryStatus.progressValue)
+                .tint(Color(delivery.deliveryStatus.color))
+            
+            // Timeline
+            timelineView(delivery: delivery)
+        }
+        .padding(.horizontal)
+    }
+    
+    // MARK: - Timeline View
+    private func timelineView(delivery: DeliveryOrder) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            timelineItem(
+                title: "Ищем курьера",
+                status: delivery.deliveryStatus,
+                targetStatus: .pendingCourier,
+                time: delivery.createdAt
+            )
+            
+            if delivery.deliveryStatus.progressValue >= DeliveryStatus.assigned.progressValue {
+                timelineItem(
+                    title: "Курьер назначен",
+                    status: delivery.deliveryStatus,
+                    targetStatus: .assigned,
+                    time: nil
+                )
+            }
+            
+            if delivery.deliveryStatus.progressValue >= DeliveryStatus.pickedUp.progressValue {
+                timelineItem(
+                    title: "Заказ забран из кафе",
+                    status: delivery.deliveryStatus,
+                    targetStatus: .pickedUp,
+                    time: delivery.pickupTime
+                )
+            }
+            
+            if delivery.deliveryStatus.progressValue >= DeliveryStatus.onWayToCustomer.progressValue {
+                timelineItem(
+                    title: "Курьер едет к вам",
+                    status: delivery.deliveryStatus,
+                    targetStatus: .onWayToCustomer,
+                    time: nil
+                )
+            }
+            
+            if delivery.deliveryStatus == .delivered {
+                timelineItem(
+                    title: "Доставлено",
+                    status: delivery.deliveryStatus,
+                    targetStatus: .delivered,
+                    time: delivery.deliveredTime
+                )
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    private func timelineItem(title: String, status: DeliveryStatus, targetStatus: DeliveryStatus, time: Date?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Circle()
+                .fill(status.progressValue >= targetStatus.progressValue ? Color(status.color) : Color.gray.opacity(0.3))
+                .frame(width: 12, height: 12)
+                .padding(.top, 4)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(status == targetStatus ? .semibold : .regular)
+                
+                if let time = time {
+                    Text(time, style: .time)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+        }
+    }
+    
+    // MARK: - Courier Info Section
+    private func courierInfoSection(courier: Courier) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Ваш курьер")
+                .font(.headline)
+            
+            HStack(spacing: 16) {
+                Image(systemName: "person.circle.fill")
+                    .font(.system(size: 50))
+                    .foregroundColor(.blue)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(courier.fullName)
+                        .font(.headline)
+                    
+                    HStack {
+                        Image(systemName: "star.fill")
+                            .foregroundColor(.yellow)
+                        Text(String(format: "%.1f", courier.rating))
+                            .font(.subheadline)
+                        
+                        Text("•")
+                            .foregroundColor(.secondary)
+                        
+                        Text("\(courier.totalDeliveries) доставок")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    HStack {
+                        Image(systemName: courier.vehicleType.icon)
+                        Text(courier.vehicleType.displayName)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    if let url = URL(string: "tel://\(courier.phone)") {
+                        UIApplication.shared.open(url)
+                    }
+                }) {
+                    Image(systemName: "phone.fill")
+                        .font(.title3)
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(Color.green)
+                        .clipShape(Circle())
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .padding(.horizontal)
+    }
+    
+    // MARK: - Delivery Details Section
+    private func deliveryDetailsSection(delivery: DeliveryOrder) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Детали доставки")
+                .font(.headline)
+            
+            detailRow(icon: "mappin.circle.fill", title: "Адрес доставки", value: delivery.deliveryAddress)
+            
+            if let instructions = delivery.deliveryInstructions {
+                detailRow(icon: "note.text", title: "Инструкции", value: instructions)
+            }
+            
+            detailRow(icon: "ruler", title: "Расстояние", value: String(format: "%.1f км", delivery.distanceKm))
+            
+            detailRow(icon: "rublesign.circle.fill", title: "Стоимость доставки", value: String(format: "%.0f ₽", delivery.deliveryFeeRubles))
+            
+            if let actualTime = delivery.actualDeliveryTime {
+                detailRow(icon: "clock.fill", title: "Фактическое время", value: "\(Int(actualTime)) мин")
+            } else if let estimatedTime = delivery.estimatedDeliveryTime {
+                detailRow(icon: "clock", title: "Ожидаемое время", value: "\(estimatedTime) мин")
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .padding(.horizontal)
+    }
+    
+    private func detailRow(icon: String, title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(.blue)
+                .frame(width: 24)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(value)
+                    .font(.subheadline)
+            }
+            
+            Spacer()
+        }
+    }
+    
+    // MARK: - Rating Sheet
+    private var ratingSheet: some View {
+        NavigationView {
+            VStack(spacing: 24) {
+                Text("Как прошла доставка?")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                
+                // Star rating
+                HStack(spacing: 8) {
+                    ForEach(1...5, id: \.self) { star in
+                        Button(action: {
+                            rating = star
+                        }) {
+                            Image(systemName: star <= rating ? "star.fill" : "star")
+                                .font(.title)
+                                .foregroundColor(star <= rating ? .yellow : .gray)
+                        }
+                    }
+                }
+                
+                // Feedback text
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Комментарий (необязательно)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    
+                    TextEditor(text: $feedback)
+                        .frame(height: 100)
+                        .padding(8)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(8)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    Task {
+                        await submitRating()
+                    }
+                }) {
+                    Text("Отправить оценку")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.blue)
+                        .cornerRadius(12)
+                }
+            }
+            .padding()
+            .navigationTitle("Оценить доставку")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Закрыть") {
+                        showRatingSheet = false
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    private func annotations(delivery: DeliveryOrder) -> [MapAnnotationItem] {
+        var items: [MapAnnotationItem] = []
+        
+        // Delivery location
+        items.append(MapAnnotationItem(
+            id: "delivery",
+            coordinate: delivery.deliveryLocation,
+            icon: "house.fill",
+            title: "Вы",
+            color: "green"
+        ))
+        
+        // Courier location
+        if let courier = courier, let location = courier.currentLocation {
+            items.append(MapAnnotationItem(
+                id: "courier",
+                coordinate: location,
+                icon: courier.vehicleType.icon,
+                title: "Курьер",
+                color: "blue"
+            ))
+        }
+        
+        return items
+    }
+    
+    private func loadDeliveryInfo() async {
+        isLoading = true
+        error = nil
+        
+        do {
+            let (fetchedDelivery, fetchedCourier) = try await DeliveryService.shared.trackDelivery(orderId: orderId)
+            
+            await MainActor.run {
+                self.delivery = fetchedDelivery
+                self.courier = fetchedCourier
+                self.isLoading = false
+                
+                // Update map region to show both locations
+                if let courier = fetchedCourier, let courierLocation = courier.currentLocation {
+                    let centerLat = (fetchedDelivery.deliveryLocation.latitude + courierLocation.latitude) / 2
+                    let centerLon = (fetchedDelivery.deliveryLocation.longitude + courierLocation.longitude) / 2
+                    
+                    let latDelta = abs(fetchedDelivery.deliveryLocation.latitude - courierLocation.latitude) * 1.5
+                    let lonDelta = abs(fetchedDelivery.deliveryLocation.longitude - courierLocation.longitude) * 1.5
+                    
+                    self.region = MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon),
+                        span: MKCoordinateSpan(
+                            latitudeDelta: max(latDelta, 0.01),
+                            longitudeDelta: max(lonDelta, 0.01)
+                        )
+                    )
+                }
+            }
+            
+            // Subscribe to updates if delivery is not complete
+            if fetchedDelivery.deliveryStatus != .delivered && fetchedDelivery.deliveryStatus != .failed {
+                DeliveryService.shared.subscribeToDeliveryUpdates(deliveryId: fetchedDelivery.id) { updatedDelivery in
+                    self.delivery = updatedDelivery
+                }
+                
+                if let courierId = fetchedDelivery.courierId {
+                    DeliveryService.shared.subscribeToCourierLocation(courierId: courierId) { updatedCourier in
+                        self.courier = updatedCourier
+                    }
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.error = "Не удалось загрузить информацию о доставке: \(error.localizedDescription)"
+                self.isLoading = false
+            }
+        }
+    }
+    
+    private func submitRating() async {
+        guard let delivery = delivery else { return }
+        
+        do {
+            try await DeliveryService.shared.rateDelivery(
+                deliveryOrderId: delivery.id,
+                rating: rating,
+                feedback: feedback.isEmpty ? nil : feedback
+            )
+            
+            await MainActor.run {
+                showRatingSheet = false
+            }
+            
+            await loadDeliveryInfo()
+        } catch {
+            await MainActor.run {
+                self.error = "Не удалось отправить оценку: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+// MARK: - Map Annotation Item
+struct MapAnnotationItem: Identifiable {
+    let id: String
+    let coordinate: CLLocationCoordinate2D
+    let icon: String
+    let title: String
+    let color: String
+}
+
+// MARK: - Error View
+struct ErrorView: View {
+    let message: String
+    let retry: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 50))
+                .foregroundColor(.orange)
+            
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            
+            Button(action: retry) {
+                Text("Повторить")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 12)
+                    .background(Color.blue)
+                    .cornerRadius(8)
+            }
+        }
+        .padding()
+    }
+}
+
+#Preview {
+    NavigationView {
+        DeliveryTrackingView(orderId: UUID())
+    }
+}

@@ -1,0 +1,435 @@
+import Combine
+import SwiftUI
+import CoreLocation
+
+enum OrderFulfillmentType {
+    case pickup
+    case delivery
+}
+
+struct DeliveryOptionView: View {
+    let cafeId: UUID
+    @Binding var fulfillmentType: OrderFulfillmentType
+    @Binding var deliveryAddress: String
+    @Binding var deliveryLocation: CLLocationCoordinate2D?
+    @Binding var deliveryInstructions: String
+    @Binding var deliveryFee: Int
+    
+    @State private var isCalculatingFee = false
+    @State private var canDeliver = false
+    @State private var estimatedTime: Int?
+    @State private var showAddressInput = false
+    @State private var error: String?
+    
+    @StateObject private var locationManager = LocationManager()
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            // Fulfillment type selector
+            Picker("Способ получения", selection: $fulfillmentType) {
+                Text("Самовывоз").tag(OrderFulfillmentType.pickup)
+                Text("Доставка").tag(OrderFulfillmentType.delivery)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: fulfillmentType) { newValue in
+                if newValue == .delivery && deliveryAddress.isEmpty {
+                    showAddressInput = true
+                }
+            }
+            
+            if fulfillmentType == .delivery {
+                deliverySection
+            }
+        }
+        .onAppear {
+            if fulfillmentType == .delivery && deliveryAddress.isEmpty {
+                // Try to get current location
+                locationManager.requestLocation()
+            }
+        }
+    }
+    
+    // MARK: - Delivery Section
+    private var deliverySection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Address input
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Адрес доставки", systemImage: "mappin.circle.fill")
+                    .font(.headline)
+                
+                if deliveryAddress.isEmpty {
+                    Button(action: {
+                        showAddressInput = true
+                    }) {
+                        HStack {
+                            Image(systemName: "plus.circle.fill")
+                            Text("Указать адрес доставки")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(deliveryAddress)
+                            .font(.subheadline)
+                        
+                        Button(action: {
+                            showAddressInput = true
+                        }) {
+                            Text("Изменить")
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding()
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
+                }
+            }
+            
+            // Delivery instructions
+            if !deliveryAddress.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Инструкции для курьера (необязательно)", systemImage: "note.text")
+                        .font(.headline)
+                    
+                    TextField("Например: домофон 123, этаж 5", text: $deliveryInstructions)
+                        .textFieldStyle(.plain)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                }
+            }
+            
+            // Delivery fee info
+            if !deliveryAddress.isEmpty {
+                deliveryFeeSection
+            }
+            
+            // Error message
+            if let error = error {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(8)
+            }
+        }
+        .sheet(isPresented: $showAddressInput) {
+            AddressInputView(
+                address: $deliveryAddress,
+                location: $deliveryLocation,
+                onSave: {
+                    showAddressInput = false
+                    if let location = deliveryLocation {
+                        Task {
+                            await calculateDeliveryFee(location: location)
+                        }
+                    }
+                }
+            )
+        }
+    }
+    
+    // MARK: - Delivery Fee Section
+    private var deliveryFeeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if isCalculatingFee {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Расчёт стоимости доставки...")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            } else if canDeliver {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Доставка доступна")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                    }
+                    
+                    HStack {
+                        Text("Стоимость:")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(String(format: "%.0f ₽", Double(deliveryFee) / 100.0))
+                            .font(.headline)
+                    }
+                    
+                    if let time = estimatedTime {
+                        HStack {
+                            Text("Ожидаемое время:")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("~\(time) мин")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                    }
+                }
+                .padding()
+                .background(Color.green.opacity(0.1))
+                .cornerRadius(12)
+            } else if deliveryLocation != nil {
+                HStack {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.red)
+                    Text("К сожалению, доставка по этому адресу недоступна")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(12)
+            }
+        }
+    }
+    
+    // MARK: - Helper Functions
+    private func calculateDeliveryFee(location: CLLocationCoordinate2D) async {
+        isCalculatingFee = true
+        error = nil
+        
+        do {
+            let response = try await DeliveryService.shared.calculateDeliveryFee(
+                cafeId: cafeId,
+                latitude: location.latitude,
+                longitude: location.longitude
+            )
+            
+            await MainActor.run {
+                self.canDeliver = response.canDeliver
+                self.deliveryFee = response.totalFee
+                self.estimatedTime = response.estimatedTime
+                self.isCalculatingFee = false
+                
+                if !response.canDeliver {
+                    self.error = "Доставка недоступна для этого адреса"
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.error = "Не удалось рассчитать стоимость доставки"
+                self.isCalculatingFee = false
+                self.canDeliver = false
+            }
+        }
+    }
+}
+
+// MARK: - Address Input View
+struct AddressInputView: View {
+    @Binding var address: String
+    @Binding var location: CLLocationCoordinate2D?
+    let onSave: () -> Void
+    
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+    @State private var searchResults: [AddressSearchResult] = []
+    @State private var isSearching = false
+    @StateObject private var locationManager = LocationManager()
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Search bar
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    
+                    TextField("Введите адрес", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .onChange(of: searchText) { newValue in
+                            if newValue.count > 2 {
+                                Task {
+                                    await searchAddress(query: newValue)
+                                }
+                            }
+                        }
+                    
+                    if !searchText.isEmpty {
+                        Button(action: {
+                            searchText = ""
+                            searchResults = []
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+                .padding()
+                
+                // Current location button
+                Button(action: {
+                    useCurrentLocation()
+                }) {
+                    HStack {
+                        Image(systemName: "location.fill")
+                            .foregroundColor(.blue)
+                        Text("Использовать текущее местоположение")
+                            .font(.subheadline)
+                        Spacer()
+                    }
+                    .padding()
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
+                }
+                .padding(.horizontal)
+                
+                Divider()
+                    .padding(.vertical)
+                
+                // Search results
+                if isSearching {
+                    ProgressView()
+                        .padding()
+                } else if !searchResults.isEmpty {
+                    List(searchResults) { result in
+                        Button(action: {
+                            selectAddress(result)
+                        }) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(result.title)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                
+                                if let subtitle = result.subtitle {
+                                    Text(subtitle)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    VStack(spacing: 16) {
+                        Image(systemName: "map")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                        
+                        Text("Введите адрес для поиска")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxHeight: .infinity)
+                }
+                
+                Spacer()
+            }
+            .navigationTitle("Адрес доставки")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Отмена") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+    
+    private func searchAddress(query: String) async {
+        isSearching = true
+        
+        // In a real app, you would use a geocoding service like Apple Maps or Google Maps
+        // For now, we'll use a simple mock implementation
+        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+        
+        // Mock results
+        await MainActor.run {
+            self.searchResults = [
+                AddressSearchResult(
+                    id: UUID(),
+                    title: query,
+                    subtitle: "Москва, Россия",
+                    coordinate: CLLocationCoordinate2D(latitude: 55.7558, longitude: 37.6173)
+                )
+            ]
+            self.isSearching = false
+        }
+    }
+    
+    private func useCurrentLocation() {
+        locationManager.requestLocation()
+        
+        if let currentLocation = locationManager.location {
+            // In a real app, you would reverse geocode to get the address
+            address = "Текущее местоположение"
+            location = currentLocation.coordinate
+            onSave()
+        }
+    }
+    
+    private func selectAddress(_ result: AddressSearchResult) {
+        address = result.title
+        location = result.coordinate
+        onSave()
+    }
+}
+
+// MARK: - Address Search Result
+struct AddressSearchResult: Identifiable {
+    let id: UUID
+    let title: String
+    let subtitle: String?
+    let coordinate: CLLocationCoordinate2D
+}
+
+// MARK: - Location Manager
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    
+    @Published var location: CLLocation?
+    @Published var authorizationStatus: CLAuthorizationStatus?
+    
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+    }
+    
+    func requestLocation() {
+        manager.requestWhenInUseAuthorization()
+        manager.requestLocation()
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        location = locations.first
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Location error: \(error)")
+    }
+    
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        authorizationStatus = manager.authorizationStatus
+    }
+}
+
+#Preview {
+    DeliveryOptionView(
+        cafeId: UUID(),
+        fulfillmentType: .constant(.pickup),
+        deliveryAddress: .constant(""),
+        deliveryLocation: .constant(nil),
+        deliveryInstructions: .constant(""),
+        deliveryFee: .constant(0)
+    )
+}

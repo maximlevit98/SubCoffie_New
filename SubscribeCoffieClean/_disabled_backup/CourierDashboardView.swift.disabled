@@ -1,0 +1,483 @@
+import SwiftUI
+import CoreLocation
+import Combine
+
+struct CourierDashboardView: View {
+    @StateObject private var viewModel = CourierDashboardViewModel()
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Status card
+                    statusCard
+                    
+                    // Stats
+                    if viewModel.isOnShift {
+                        statsSection
+                    }
+                    
+                    // Active deliveries
+                    if !viewModel.activeDeliveries.isEmpty {
+                        activeDeliveriesSection
+                    }
+                    
+                    // Shift controls
+                    shiftControlsSection
+                }
+                .padding()
+            }
+            .navigationTitle("Доставка")
+            .alert("Ошибка", isPresented: $viewModel.showError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.errorMessage)
+            }
+        }
+        .task {
+            await viewModel.loadCourierInfo()
+        }
+    }
+    
+    // MARK: - Status Card
+    private var statusCard: some View {
+        VStack(spacing: 16) {
+            if let courier = viewModel.courier {
+                HStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(courier.fullName)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        HStack {
+                            Circle()
+                                .fill(Color(courier.status.color))
+                                .frame(width: 12, height: 12)
+                            Text(courier.status.displayName)
+                                .font(.subheadline)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    VStack(alignment: .trailing, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "star.fill")
+                                .foregroundColor(.yellow)
+                            Text(String(format: "%.1f", courier.rating))
+                                .font(.headline)
+                        }
+                        
+                        Text("\(courier.totalDeliveries) доставок")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Divider()
+                
+                HStack {
+                    Image(systemName: courier.vehicleType.icon)
+                    Text(courier.vehicleType.displayName)
+                    Spacer()
+                }
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            } else {
+                ProgressView("Загрузка...")
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Stats Section
+    private var statsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Статистика смены")
+                .font(.headline)
+            
+            HStack(spacing: 16) {
+                statBox(
+                    title: "Доставлено",
+                    value: "\(viewModel.shiftDeliveries)",
+                    icon: "checkmark.circle.fill",
+                    color: .green
+                )
+                
+                statBox(
+                    title: "В процессе",
+                    value: "\(viewModel.activeDeliveries.count)",
+                    icon: "shippingbox.fill",
+                    color: .blue
+                )
+            }
+        }
+    }
+    
+    private func statBox(title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+            
+            Text(value)
+                .font(.title)
+                .fontWeight(.bold)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    // MARK: - Active Deliveries Section
+    private var activeDeliveriesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Активные заказы")
+                .font(.headline)
+            
+            ForEach(viewModel.activeDeliveries) { delivery in
+                NavigationLink(destination: CourierDeliveryDetailView(delivery: delivery)) {
+                    CourierDeliveryCard(delivery: delivery)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Shift Controls Section
+    private var shiftControlsSection: some View {
+        VStack(spacing: 12) {
+            if viewModel.isOnShift {
+                Button(action: {
+                    Task {
+                        await viewModel.endShift()
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "stop.circle.fill")
+                        Text("Закончить смену")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.red)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                
+                if viewModel.courier?.status == .available {
+                    Button(action: {
+                        Task {
+                            await viewModel.goOnBreak()
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "pause.circle.fill")
+                            Text("Перерыв")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.orange)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                } else if viewModel.courier?.status == .onBreak {
+                    Button(action: {
+                        Task {
+                            await viewModel.resumeFromBreak()
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                            Text("Вернуться к работе")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.green)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                }
+            } else {
+                Button(action: {
+                    Task {
+                        await viewModel.startShift()
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "play.circle.fill")
+                        Text("Начать смену")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Courier Delivery Card
+struct CourierDeliveryCard: View {
+    let delivery: ActiveDeliveryDetail
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Status badge
+            HStack {
+                Image(systemName: delivery.deliveryStatus.icon)
+                    .foregroundColor(Color(delivery.deliveryStatus.color))
+                Text(delivery.deliveryStatus.displayName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Spacer()
+                if let time = delivery.estimatedTime {
+                    Text("~\(time) мин")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Divider()
+            
+            // Cafe info
+            HStack(spacing: 12) {
+                Image(systemName: "building.2.fill")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(delivery.cafeName)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Text(delivery.cafeAddress)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            
+            // Delivery address
+            HStack(spacing: 12) {
+                Image(systemName: "mappin.circle.fill")
+                    .foregroundColor(.green)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(delivery.deliveryAddress)
+                        .font(.subheadline)
+                        .lineLimit(2)
+                }
+            }
+            
+            // Order total
+            HStack {
+                Text("Сумма заказа:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(String(format: "%.0f ₽", Double(delivery.orderTotal) / 100.0))
+                    .font(.headline)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - View Model
+@MainActor
+class CourierDashboardViewModel: ObservableObject {
+    @Published var courier: Courier?
+    @Published var activeDeliveries: [ActiveDeliveryDetail] = []
+    @Published var isOnShift = false
+    @Published var shiftDeliveries = 0
+    @Published var showError = false
+    @Published var errorMessage = ""
+    
+    private var currentCourierId: UUID?
+    private let locationManager = CLLocationManager()
+    
+    init() {
+        setupLocationTracking()
+    }
+    
+    func loadCourierInfo() async {
+        // In a real app, get current user's courier ID from auth
+        // For now, we'll need to get it from the user session
+        guard let userId = try? await SupabaseManager.shared.client.auth.session.user.id else {
+            showError(message: "Пользователь не авторизован")
+            return
+        }
+        
+        do {
+            // Fetch courier info
+            let response = try await SupabaseManager.shared.client
+                .from("couriers")
+                .select("""
+                    *,
+                    current_lat:ST_Y(current_location::geometry),
+                    current_lon:ST_X(current_location::geometry)
+                """)
+                .eq("user_id", value: userId.uuidString)
+                .single()
+                .execute()
+            
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            decoder.dateDecodingStrategy = .iso8601
+            
+            courier = try decoder.decode(Courier.self, from: response.data)
+            currentCourierId = courier?.id
+            
+            // Check if on shift
+            if let courierId = currentCourierId {
+                await checkShiftStatus(courierId: courierId)
+                await loadActiveDeliveries(courierId: courierId)
+            }
+        } catch {
+            showError(message: "Не удалось загрузить данные курьера: \(error.localizedDescription)")
+        }
+    }
+    
+    func startShift() async {
+        guard let courierId = currentCourierId else { return }
+        
+        do {
+            _ = try await SupabaseManager.shared.client
+                .rpc("start_courier_shift", params: [
+                    "p_courier_id": courierId.uuidString
+                ])
+                .execute()
+            
+            isOnShift = true
+            await loadCourierInfo()
+        } catch {
+            showError(message: "Не удалось начать смену: \(error.localizedDescription)")
+        }
+    }
+    
+    func endShift() async {
+        guard let courierId = currentCourierId else { return }
+        
+        do {
+            _ = try await SupabaseManager.shared.client
+                .rpc("end_courier_shift", params: [
+                    "p_courier_id": courierId.uuidString
+                ])
+                .execute()
+            
+            isOnShift = false
+            await loadCourierInfo()
+        } catch {
+            showError(message: "Не удалось закончить смену: \(error.localizedDescription)")
+        }
+    }
+    
+    func goOnBreak() async {
+        guard let courierId = currentCourierId else { return }
+        
+        do {
+            _ = try await SupabaseManager.shared.client
+                .from("couriers")
+                .update(["status": "on_break"])
+                .eq("id", value: courierId.uuidString)
+                .execute()
+            
+            await loadCourierInfo()
+        } catch {
+            showError(message: "Не удалось взять перерыв: \(error.localizedDescription)")
+        }
+    }
+    
+    func resumeFromBreak() async {
+        guard let courierId = currentCourierId else { return }
+        
+        do {
+            _ = try await SupabaseManager.shared.client
+                .from("couriers")
+                .update(["status": "available"])
+                .eq("id", value: courierId.uuidString)
+                .execute()
+            
+            await loadCourierInfo()
+        } catch {
+            showError(message: "Не удалось вернуться к работе: \(error.localizedDescription)")
+        }
+    }
+    
+    private func checkShiftStatus(courierId: UUID) async {
+        do {
+            let response = try await SupabaseManager.shared.client
+                .from("courier_shifts")
+                .select()
+                .eq("courier_id", value: courierId.uuidString)
+                .eq("status", value: "active")
+                .maybeSingle()
+                .execute()
+            
+            isOnShift = response.data.count > 0
+        } catch {
+            print("Error checking shift status: \(error)")
+        }
+    }
+    
+    private func loadActiveDeliveries(courierId: UUID) async {
+        do {
+            let response = try await SupabaseManager.shared.client
+                .rpc("get_courier_deliveries", params: [
+                    "p_courier_id": courierId.uuidString,
+                    "p_include_completed": false
+                ])
+                .execute()
+            
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            decoder.dateDecodingStrategy = .iso8601
+            
+            activeDeliveries = try decoder.decode([ActiveDeliveryDetail].self, from: response.data)
+        } catch {
+            print("Error loading active deliveries: \(error)")
+        }
+    }
+    
+    private func setupLocationTracking() {
+        locationManager.requestAlwaysAuthorization()
+        locationManager.startUpdatingLocation()
+        
+        // In a real app, you would implement CLLocationManagerDelegate
+        // and update the courier's location to the backend periodically
+    }
+    
+    func updateLocation(_ location: CLLocation) async {
+        guard let courierId = currentCourierId, isOnShift else { return }
+        
+        do {
+            _ = try await DeliveryService.shared.updateCourierLocation(
+                courierId: courierId,
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                accuracy: location.horizontalAccuracy,
+                speed: location.speed >= 0 ? location.speed : nil,
+                heading: location.course >= 0 ? location.course : nil
+            )
+        } catch {
+            print("Error updating location: \(error)")
+        }
+    }
+    
+    private func showError(message: String) {
+        errorMessage = message
+        showError = true
+    }
+}
+
+#Preview {
+    CourierDashboardView()
+}

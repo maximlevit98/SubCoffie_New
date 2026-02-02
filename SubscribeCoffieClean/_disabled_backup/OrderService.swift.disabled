@@ -1,0 +1,450 @@
+import Foundation
+
+struct OrderService {
+    private let apiClient: SupabaseAPIClient
+    private struct InsertedId: Decodable { let id: UUID }
+
+    init(apiClient: SupabaseAPIClient = SupabaseAPIClient()) {
+        self.apiClient = apiClient
+    }
+
+    func createOrder(
+        cafeId: UUID,
+        phone: String,
+        cartLines: [CartLine],
+        subtotalCredits: Int,
+        bonusUsed: Int,
+        paidCredits: Int,
+        scheduledReadyAtISO: String? = nil,
+        etaSec: Int? = nil
+    ) async throws -> UUID {
+        // Insert order
+        struct InsertedId: Decodable { let id: UUID }
+        var orderPayload: [[String: Any]] = [[
+            "cafe_id": cafeId.uuidString,
+            "customer_phone": phone,
+            "status": OrderStatus.created.rawValue,
+            "eta_minutes": 0,
+            "subtotal_credits": subtotalCredits,
+            "bonus_used": bonusUsed,
+            "paid_credits": paidCredits
+        ]]
+        let scheduled = scheduledReadyAtISO ?? UserDefaults.standard.string(forKey: "sc_selected_slot_iso")
+        if let scheduled, !scheduled.isEmpty {
+            orderPayload[0]["scheduled_ready_at"] = scheduled
+        }
+        let eta = etaSec ?? UserDefaults.standard.integer(forKey: "sc_selected_slot_eta_sec")
+        if eta > 0 {
+            orderPayload[0]["eta_sec"] = eta
+        }
+        let orderData = try JSONSerialization.data(withJSONObject: orderPayload)
+        let insertedOrders: [InsertedId] = try await apiClient.post("orders", body: orderData)
+        guard let orderId = insertedOrders.first?.id else {
+            throw NetworkError.decoding(NSError(domain: "OrderService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Missing order id"]))
+        }
+
+        // Insert order_items
+        let itemsPayload: [[String: Any]] = cartLines.map { line in
+            [
+                "order_id": orderId.uuidString,
+                "menu_item_id": line.product.id.uuidString as Any,
+                "title": line.title,
+                "unit_credits": line.unitPrice,
+                "quantity": line.quantity,
+                "category": line.product.category.rawValue
+            ]
+        }
+        let itemsData = try JSONSerialization.data(withJSONObject: itemsPayload)
+        let _: [InsertedId] = try await apiClient.post("order_items", body: itemsData)
+
+        // Insert order_events
+        let eventsPayload: [[String: Any]] = [[
+            "order_id": orderId.uuidString,
+            "status": OrderStatus.created.rawValue
+        ]]
+        let eventsData = try JSONSerialization.data(withJSONObject: eventsPayload)
+        let _: [InsertedId] = try await apiClient.post("order_events", body: eventsData)
+
+        #if DEBUG
+        print("Order created in Supabase: \(orderId)")
+        #endif
+        return orderId
+    }
+
+    func fetchOrder(orderId: UUID) async throws -> Order {
+        #if DEBUG
+        print("📡 [OrderService] Fetching order: \(orderId.uuidString)")
+        #endif
+        
+        let orders: [SupabaseOrderDTO] = try await apiClient.get(
+            "orders",
+            queryItems: [
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "id", value: "eq.\(orderId.uuidString)")
+            ]
+        )
+        
+        #if DEBUG
+        print("📦 [OrderService] Received \(orders.count) orders")
+        if let first = orders.first {
+            print("📦 [OrderService] Order status: \(first.status)")
+        }
+        #endif
+        
+        guard let dto = orders.first, let order = dto.asDomain() else {
+            #if DEBUG
+            print("❌ [OrderService] Failed to map order or empty response")
+            #endif
+            throw NetworkError.emptyData
+        }
+        return order
+    }
+
+    func fetchOrderEvents(orderId: UUID) async throws -> [OrderStatusEvent] {
+        let events: [SupabaseOrderEventDTO] = try await apiClient.get(
+            "order_events",
+            queryItems: [
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order_id", value: "eq.\(orderId.uuidString)"),
+                URLQueryItem(name: "order", value: "created_at.asc")
+            ]
+        )
+        return events.compactMap { $0.asDomain() }
+    }
+
+    func setOrderStatus(orderId: UUID, status: OrderStatus) async throws {
+        // Update orders.status (and pickup_deadline for Ready)
+        var payload: [[String: Any]] = [[
+            "status": status.rawValue
+        ]]
+        if status == .ready {
+            let deadline = Date().addingTimeInterval(30 * 60)
+            let iso = ISO8601DateFormatter()
+            payload[0]["pickup_deadline"] = iso.string(from: deadline)
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let _: [InsertedId] = try await apiClient.patch(
+            "orders",
+            queryItems: [URLQueryItem(name: "id", value: "eq.\(orderId.uuidString)")],
+            body: data
+        )
+
+        // Insert event
+        let eventPayload: [[String: Any]] = [[
+            "order_id": orderId.uuidString,
+            "status": status.rawValue
+        ]]
+        let evData = try JSONSerialization.data(withJSONObject: eventPayload)
+        let _: [InsertedId] = try await apiClient.post("order_events", body: evData)
+    }
+
+    func createOrderQrToken(orderId: UUID) async throws -> String {
+        let request = QrTokenRequest(orderId: orderId)
+        let encoder = JSONEncoder()
+        let body = try encoder.encode(request)
+        let token: String = try await apiClient.post("rpc/create_order_qr_token", body: body)
+        guard !token.isEmpty else {
+            throw NetworkError.decoding(NSError(domain: "OrderService", code: -2, userInfo: [NSLocalizedDescriptionKey: "Missing QR token"]))
+        }
+        return token
+    }
+    
+    // MARK: - Order History
+    
+    func fetchOrderHistory(phone: String, limit: Int = 20, offset: Int = 0) async throws -> [OrderHistoryItem] {
+        let request = OrderHistoryRequest(phone: phone, limit: limit, offset: offset)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(request)
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        let response: [OrderHistoryDTO] = try await apiClient.post("rpc/get_user_order_history", body: body, decoder: decoder)
+        return response.map { $0.asDomain() }
+    }
+    
+    func fetchOrderWithDetails(orderId: UUID) async throws -> OrderWithDetails {
+        let request = OrderDetailsRequest(orderId: orderId)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(request)
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        let response: [OrderWithDetailsDTO] = try await apiClient.post("rpc/get_order_with_items", body: body, decoder: decoder)
+        guard let dto = response.first else {
+            throw NetworkError.emptyData
+        }
+        return dto.asDomain()
+    }
+    
+    func reorderFromExisting(originalOrderId: UUID, scheduledReadyAt: Date? = nil, etaSec: Int? = nil) async throws -> UUID {
+        var request = ReorderRequest(originalOrderId: originalOrderId)
+        
+        if let scheduledReadyAt = scheduledReadyAt {
+            let iso = ISO8601DateFormatter()
+            request.scheduledReadyAt = iso.string(from: scheduledReadyAt)
+        }
+        
+        if let etaSec = etaSec {
+            request.etaSec = etaSec
+        }
+        
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(request)
+        
+        let orderId: UUID = try await apiClient.post("rpc/reorder", body: body)
+        
+        #if DEBUG
+        print("✅ [OrderService] Reordered successfully: \(orderId)")
+        #endif
+        
+        return orderId
+    }
+    
+    func fetchOrderStatistics(phone: String) async throws -> OrderStatistics {
+        let request = OrderStatisticsRequest(phone: phone)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let body = try encoder.encode(request)
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        
+        let response: [OrderStatisticsDTO] = try await apiClient.post("rpc/get_order_statistics", body: body, decoder: decoder)
+        guard let dto = response.first else {
+            throw NetworkError.emptyData
+        }
+        return dto.asDomain()
+    }
+}
+
+// MARK: - Request/Response Models
+
+private struct QrTokenRequest: Encodable {
+    let orderId: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case orderId = "p_order_id"
+    }
+}
+
+private struct QrTokenRow: Decodable {
+    let token: String
+
+    enum CodingKeys: String, CodingKey {
+        case token
+        case qrToken = "qr_token"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decodeIfPresent(String.self, forKey: .token)
+            ?? container.decode(String.self, forKey: .qrToken)
+    }
+}
+
+private struct OrderHistoryRequest: Encodable {
+    let phone: String
+    let limit: Int
+    let offset: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case phone = "p_phone"
+        case limit = "p_limit"
+        case offset = "p_offset"
+    }
+}
+
+private struct OrderDetailsRequest: Encodable {
+    let orderId: UUID
+    
+    enum CodingKeys: String, CodingKey {
+        case orderId = "p_order_id"
+    }
+}
+
+private struct ReorderRequest: Encodable {
+    let originalOrderId: UUID
+    var scheduledReadyAt: String?
+    var etaSec: Int?
+    
+    enum CodingKeys: String, CodingKey {
+        case originalOrderId = "p_original_order_id"
+        case scheduledReadyAt = "p_scheduled_ready_at"
+        case etaSec = "p_eta_sec"
+    }
+}
+
+private struct OrderStatisticsRequest: Encodable {
+    let phone: String
+    
+    enum CodingKeys: String, CodingKey {
+        case phone = "p_phone"
+    }
+}
+
+// MARK: - DTOs
+
+struct OrderHistoryDTO: Decodable {
+    let orderId: UUID
+    let cafeId: UUID
+    let cafeName: String?
+    let status: String
+    let createdAt: Date
+    let scheduledReadyAt: Date?
+    let subtotalCredits: Int
+    let bonusUsed: Int
+    let paidCredits: Int
+    let etaMinutes: Int
+    let items: [OrderItemDTO]
+    
+    func asDomain() -> OrderHistoryItem {
+        OrderHistoryItem(
+            id: orderId,
+            cafeId: cafeId,
+            cafeName: cafeName ?? "Unknown Cafe",
+            status: OrderStatus(rawValue: status) ?? .created,
+            createdAt: createdAt,
+            scheduledReadyAt: scheduledReadyAt,
+            subtotalCredits: subtotalCredits,
+            bonusUsed: bonusUsed,
+            paidCredits: paidCredits,
+            itemCount: items.count,
+            items: items.map { $0.asDomain() }
+        )
+    }
+}
+
+struct OrderItemDTO: Decodable {
+    let id: UUID
+    let menuItemId: UUID?
+    let title: String
+    let unitCredits: Int
+    let quantity: Int
+    let category: String
+    
+    func asDomain() -> OrderItemSnapshot {
+        OrderItemSnapshot(
+            id: id,
+            orderId: nil,
+            title: title,
+            unitCredits: unitCredits,
+            quantity: quantity,
+            category: CafeMenuCategory(rawValue: category) ?? .drink
+        )
+    }
+}
+
+struct OrderWithDetailsDTO: Decodable {
+    let orderId: UUID
+    let cafeId: UUID
+    let cafeName: String?
+    let status: String
+    let createdAt: Date
+    let scheduledReadyAt: Date?
+    let pickupDeadline: Date?
+    let subtotalCredits: Int
+    let bonusUsed: Int
+    let paidCredits: Int
+    let etaMinutes: Int
+    let etaSec: Int?
+    let customerPhone: String
+    let items: [OrderItemDTO]
+    let events: [OrderEventDTO]
+    
+    func asDomain() -> OrderWithDetails {
+        OrderWithDetails(
+            id: orderId,
+            cafeId: cafeId,
+            cafeName: cafeName,
+            status: OrderStatus(rawValue: status) ?? .created,
+            createdAt: createdAt,
+            scheduledReadyAt: scheduledReadyAt,
+            pickupDeadline: pickupDeadline,
+            subtotalCredits: subtotalCredits,
+            bonusUsed: bonusUsed,
+            paidCredits: paidCredits,
+            etaMinutes: etaMinutes,
+            items: items.map { $0.asDomain() },
+            events: events.map { $0.asDomain() }
+        )
+    }
+}
+
+struct OrderEventDTO: Decodable {
+    let id: UUID
+    let status: String
+    let createdAt: Date
+    
+    func asDomain() -> OrderStatusEvent {
+        OrderStatusEvent(
+            id: id,
+            status: OrderStatus(rawValue: status) ?? .created,
+            timestamp: createdAt
+        )
+    }
+}
+
+struct OrderStatisticsDTO: Decodable {
+    let totalOrders: Int
+    let completedOrders: Int
+    let totalSpentCredits: Int
+    let favoriteCafeId: UUID?
+    let favoriteCafeName: String?
+    
+    func asDomain() -> OrderStatistics {
+        OrderStatistics(
+            totalOrders: totalOrders,
+            completedOrders: completedOrders,
+            totalSpentCredits: totalSpentCredits,
+            favoriteCafeId: favoriteCafeId,
+            favoriteCafeName: favoriteCafeName
+        )
+    }
+}
+
+// MARK: - Domain Models
+
+struct OrderHistoryItem: Identifiable, Equatable {
+    let id: UUID
+    let cafeId: UUID
+    let cafeName: String
+    let status: OrderStatus
+    let createdAt: Date
+    let scheduledReadyAt: Date?
+    let subtotalCredits: Int
+    let bonusUsed: Int
+    let paidCredits: Int
+    let itemCount: Int
+    let items: [OrderItemSnapshot]
+}
+
+struct OrderWithDetails: Identifiable {
+    let id: UUID
+    let cafeId: UUID
+    let cafeName: String?
+    let status: OrderStatus
+    let createdAt: Date
+    let scheduledReadyAt: Date?
+    let pickupDeadline: Date?
+    let subtotalCredits: Int
+    let bonusUsed: Int
+    let paidCredits: Int
+    let etaMinutes: Int
+    let items: [OrderItemSnapshot]
+    let events: [OrderStatusEvent]
+}
+
+struct OrderStatistics {
+    let totalOrders: Int
+    let completedOrders: Int
+    let totalSpentCredits: Int
+    let favoriteCafeId: UUID?
+    let favoriteCafeName: String?
+}

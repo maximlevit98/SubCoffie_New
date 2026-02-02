@@ -1,0 +1,814 @@
+-- Migration: Multi-regional Support and Franchise Management
+-- Description: Tables and RPC functions for managing regions, delivery zones, and franchise partners
+-- Date: 2026-02-20
+
+-- ============================================================================
+-- 1. TABLE: Regions
+-- ============================================================================
+
+create table if not exists public.regions (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  country text not null default 'Russia',
+  city text not null,
+  timezone text not null default 'Europe/Moscow',
+  is_active boolean not null default true,
+  latitude decimal(10, 8),
+  longitude decimal(11, 8),
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now(),
+  
+  constraint regions_name_unique unique (name),
+  constraint regions_city_country_unique unique (city, country)
+);
+
+comment on table public.regions is 'Geographic regions where the platform operates';
+comment on column public.regions.name is 'Display name of the region (e.g., "Moscow", "Saint Petersburg")';
+comment on column public.regions.city is 'City name';
+comment on column public.regions.country is 'Country name';
+comment on column public.regions.timezone is 'IANA timezone identifier for the region';
+comment on column public.regions.is_active is 'Whether the region is currently accepting orders';
+comment on column public.regions.latitude is 'Region center latitude for geolocation';
+comment on column public.regions.longitude is 'Region center longitude for geolocation';
+
+create index if not exists idx_regions_is_active on public.regions(is_active);
+create index if not exists idx_regions_city on public.regions(city);
+
+-- ============================================================================
+-- 2. TABLE: Cafe Regions
+-- ============================================================================
+
+create table if not exists public.cafe_regions (
+  cafe_id uuid not null references public.cafes(id) on delete cascade,
+  region_id uuid not null references public.regions(id) on delete restrict,
+  assigned_at timestamp with time zone default now(),
+  
+  primary key (cafe_id, region_id)
+);
+
+comment on table public.cafe_regions is 'Maps cafes to their operating regions';
+comment on column public.cafe_regions.cafe_id is 'Reference to the cafe';
+comment on column public.cafe_regions.region_id is 'Reference to the region';
+
+create index if not exists idx_cafe_regions_region_id on public.cafe_regions(region_id);
+
+-- ============================================================================
+-- 3. TABLE: Delivery Zones
+-- ============================================================================
+
+create table if not exists public.delivery_zones (
+  id uuid primary key default gen_random_uuid(),
+  region_id uuid not null references public.regions(id) on delete cascade,
+  name text not null,
+  description text,
+  -- GeoJSON polygon for the delivery zone boundary
+  boundary jsonb not null,
+  base_delivery_fee decimal(10, 2) not null default 0.00,
+  min_order_amount decimal(10, 2) not null default 0.00,
+  is_active boolean not null default true,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now(),
+  
+  constraint delivery_zones_base_fee_positive check (base_delivery_fee >= 0),
+  constraint delivery_zones_min_order_positive check (min_order_amount >= 0)
+);
+
+comment on table public.delivery_zones is 'Delivery zones within regions with their pricing';
+comment on column public.delivery_zones.name is 'Zone name (e.g., "Central District", "North Zone")';
+comment on column public.delivery_zones.boundary is 'GeoJSON polygon defining the zone boundary';
+comment on column public.delivery_zones.base_delivery_fee is 'Base delivery fee for this zone in credits';
+comment on column public.delivery_zones.min_order_amount is 'Minimum order amount for delivery in credits';
+comment on column public.delivery_zones.is_active is 'Whether delivery is available in this zone';
+
+create index if not exists idx_delivery_zones_region_id on public.delivery_zones(region_id);
+create index if not exists idx_delivery_zones_is_active on public.delivery_zones(is_active);
+
+-- ============================================================================
+-- 4. TABLE: Franchise Partners
+-- ============================================================================
+
+create table if not exists public.franchise_partners (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete restrict,
+  company_name text not null,
+  contact_person text not null,
+  email text not null,
+  phone text not null,
+  tax_id text,
+  regions uuid[] not null default '{}',
+  contract_number text,
+  contract_start_date date,
+  contract_end_date date,
+  commission_rate decimal(5, 2) not null default 10.00,
+  status text not null default 'active' check (status in ('active', 'suspended', 'terminated')),
+  notes text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now(),
+  
+  constraint franchise_partners_commission_rate_valid check (commission_rate >= 0 and commission_rate <= 100),
+  constraint franchise_partners_email_valid check (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+);
+
+comment on table public.franchise_partners is 'Franchise partners managing cafes in specific regions';
+comment on column public.franchise_partners.user_id is 'Reference to the user profile of the franchise partner';
+comment on column public.franchise_partners.company_name is 'Legal company name';
+comment on column public.franchise_partners.regions is 'Array of region IDs this franchise operates in';
+comment on column public.franchise_partners.commission_rate is 'Platform commission rate for this franchise';
+comment on column public.franchise_partners.status is 'Current status of the franchise partnership';
+
+create index if not exists idx_franchise_partners_user_id on public.franchise_partners(user_id);
+create index if not exists idx_franchise_partners_status on public.franchise_partners(status);
+
+-- ============================================================================
+-- 5. RLS Policies
+-- ============================================================================
+
+-- Enable RLS on all tables
+alter table public.regions enable row level security;
+alter table public.cafe_regions enable row level security;
+alter table public.delivery_zones enable row level security;
+alter table public.franchise_partners enable row level security;
+
+-- Regions: Everyone can view active regions
+create policy "Anyone can view active regions"
+  on public.regions for select
+  using (is_active = true);
+
+create policy "Admins can manage regions"
+  on public.regions for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Cafe regions: Everyone can view
+create policy "Anyone can view cafe regions"
+  on public.cafe_regions for select
+  using (true);
+
+create policy "Admins can manage cafe regions"
+  on public.cafe_regions for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Delivery zones: Everyone can view active zones
+create policy "Anyone can view active delivery zones"
+  on public.delivery_zones for select
+  using (is_active = true);
+
+create policy "Admins can manage delivery zones"
+  on public.delivery_zones for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Franchise partners: Only admins and the partner themselves can view
+create policy "Admins and self can view franchise partners"
+  on public.franchise_partners for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or user_id = auth.uid()
+  );
+
+create policy "Admins can manage franchise partners"
+  on public.franchise_partners for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- ============================================================================
+-- 6. RPC: Get Cafes in Region
+-- ============================================================================
+
+create or replace function public.get_cafes_in_region(
+  p_region_id uuid,
+  p_limit int default 50,
+  p_offset int default 0
+)
+returns table(
+  cafe_id uuid,
+  cafe_name text,
+  cafe_address text,
+  cafe_mode text,
+  cafe_latitude decimal,
+  cafe_longitude decimal,
+  assigned_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if region exists
+  if not exists (select 1 from public.regions where id = p_region_id) then
+    raise exception 'Region not found';
+  end if;
+  
+  return query
+  select
+    c.id as cafe_id,
+    c.name as cafe_name,
+    c.address as cafe_address,
+    c.mode::text as cafe_mode,
+    c.latitude as cafe_latitude,
+    c.longitude as cafe_longitude,
+    cr.assigned_at
+  from public.cafe_regions cr
+  inner join public.cafes c on c.id = cr.cafe_id
+  where cr.region_id = p_region_id
+  order by c.name
+  limit p_limit
+  offset p_offset;
+end;
+$$;
+
+comment on function public.get_cafes_in_region is 'Get all cafes operating in a specific region';
+
+-- ============================================================================
+-- 7. RPC: Calculate Delivery Fee
+-- ============================================================================
+
+create or replace function public.calculate_delivery_fee(
+  p_cafe_id uuid,
+  p_user_latitude decimal,
+  p_user_longitude decimal
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_region_id uuid;
+  v_zone_id uuid;
+  v_base_fee decimal(10, 2);
+  v_distance_km decimal(10, 2);
+  v_total_fee decimal(10, 2);
+  v_cafe_lat decimal;
+  v_cafe_lon decimal;
+  v_min_order_amount decimal(10, 2);
+begin
+  -- Get cafe location and region
+  select c.latitude, c.longitude, cr.region_id
+  into v_cafe_lat, v_cafe_lon, v_region_id
+  from public.cafes c
+  left join public.cafe_regions cr on cr.cafe_id = c.id
+  where c.id = p_cafe_id
+  limit 1;
+  
+  if v_cafe_lat is null then
+    raise exception 'Cafe not found or has no location';
+  end if;
+  
+  -- Calculate distance using Haversine formula (approximate)
+  -- This is a simplified calculation; for production, consider using PostGIS
+  v_distance_km := (
+    6371 * acos(
+      cos(radians(p_user_latitude)) *
+      cos(radians(v_cafe_lat)) *
+      cos(radians(v_cafe_lon) - radians(p_user_longitude)) +
+      sin(radians(p_user_latitude)) *
+      sin(radians(v_cafe_lat))
+    )
+  );
+  
+  -- Find matching delivery zone (simplified: using first active zone in region)
+  -- In production, implement proper point-in-polygon check using boundary
+  select id, base_delivery_fee, min_order_amount
+  into v_zone_id, v_base_fee, v_min_order_amount
+  from public.delivery_zones
+  where region_id = v_region_id
+    and is_active = true
+  order by base_delivery_fee
+  limit 1;
+  
+  if v_zone_id is null then
+    return jsonb_build_object(
+      'available', false,
+      'message', 'Delivery not available in this area'
+    );
+  end if;
+  
+  -- Calculate total fee (base fee + distance-based fee)
+  -- Simple pricing: base fee + 50 credits per km
+  v_total_fee := v_base_fee + (v_distance_km * 50);
+  
+  return jsonb_build_object(
+    'available', true,
+    'zone_id', v_zone_id,
+    'base_fee', v_base_fee,
+    'distance_km', round(v_distance_km, 2),
+    'total_fee', round(v_total_fee, 2),
+    'min_order_amount', v_min_order_amount
+  );
+end;
+$$;
+
+comment on function public.calculate_delivery_fee is 'Calculate delivery fee based on cafe location and user location';
+
+-- ============================================================================
+-- 8. RPC: Create Region
+-- ============================================================================
+
+create or replace function public.create_region(
+  p_name text,
+  p_city text,
+  p_country text default 'Russia',
+  p_timezone text default 'Europe/Moscow',
+  p_latitude decimal default null,
+  p_longitude decimal default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_region_id uuid;
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can create regions';
+  end if;
+  
+  -- Validate inputs
+  if p_name is null or trim(p_name) = '' then
+    raise exception 'Region name is required';
+  end if;
+  
+  if p_city is null or trim(p_city) = '' then
+    raise exception 'City name is required';
+  end if;
+  
+  -- Create region
+  insert into public.regions (name, city, country, timezone, latitude, longitude)
+  values (trim(p_name), trim(p_city), trim(p_country), p_timezone, p_latitude, p_longitude)
+  returning id into v_region_id;
+  
+  return v_region_id;
+end;
+$$;
+
+comment on function public.create_region is 'Create a new region (admin only)';
+
+-- ============================================================================
+-- 9. RPC: Update Region
+-- ============================================================================
+
+create or replace function public.update_region(
+  p_region_id uuid,
+  p_name text default null,
+  p_is_active boolean default null,
+  p_timezone text default null,
+  p_latitude decimal default null,
+  p_longitude decimal default null
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can update regions';
+  end if;
+  
+  -- Update region
+  update public.regions
+  set
+    name = coalesce(trim(p_name), name),
+    is_active = coalesce(p_is_active, is_active),
+    timezone = coalesce(p_timezone, timezone),
+    latitude = coalesce(p_latitude, latitude),
+    longitude = coalesce(p_longitude, longitude),
+    updated_at = now()
+  where id = p_region_id;
+  
+  if not found then
+    raise exception 'Region not found';
+  end if;
+  
+  return true;
+end;
+$$;
+
+comment on function public.update_region is 'Update region details (admin only)';
+
+-- ============================================================================
+-- 10. RPC: Assign Cafe to Region
+-- ============================================================================
+
+create or replace function public.assign_cafe_to_region(
+  p_cafe_id uuid,
+  p_region_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can assign cafes to regions';
+  end if;
+  
+  -- Check if cafe exists
+  if not exists (select 1 from public.cafes where id = p_cafe_id) then
+    raise exception 'Cafe not found';
+  end if;
+  
+  -- Check if region exists
+  if not exists (select 1 from public.regions where id = p_region_id) then
+    raise exception 'Region not found';
+  end if;
+  
+  -- Check if already assigned
+  if exists (
+    select 1 from public.cafe_regions
+    where cafe_id = p_cafe_id and region_id = p_region_id
+  ) then
+    raise exception 'Cafe is already assigned to this region';
+  end if;
+  
+  -- Assign cafe to region
+  insert into public.cafe_regions (cafe_id, region_id)
+  values (p_cafe_id, p_region_id);
+  
+  return true;
+end;
+$$;
+
+comment on function public.assign_cafe_to_region is 'Assign a cafe to a region (admin only)';
+
+-- ============================================================================
+-- 11. RPC: Remove Cafe from Region
+-- ============================================================================
+
+create or replace function public.remove_cafe_from_region(
+  p_cafe_id uuid,
+  p_region_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can remove cafes from regions';
+  end if;
+  
+  -- Remove assignment
+  delete from public.cafe_regions
+  where cafe_id = p_cafe_id and region_id = p_region_id;
+  
+  if not found then
+    raise exception 'Cafe is not assigned to this region';
+  end if;
+  
+  return true;
+end;
+$$;
+
+comment on function public.remove_cafe_from_region is 'Remove a cafe from a region (admin only)';
+
+-- ============================================================================
+-- 12. RPC: Get All Regions
+-- ============================================================================
+
+create or replace function public.get_all_regions(
+  p_include_inactive boolean default false
+)
+returns table(
+  region_id uuid,
+  region_name text,
+  city text,
+  country text,
+  timezone text,
+  is_active boolean,
+  latitude decimal,
+  longitude decimal,
+  cafe_count bigint,
+  created_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select
+    r.id as region_id,
+    r.name as region_name,
+    r.city,
+    r.country,
+    r.timezone,
+    r.is_active,
+    r.latitude,
+    r.longitude,
+    (
+      select count(*)
+      from public.cafe_regions
+      where region_id = r.id
+    ) as cafe_count,
+    r.created_at
+  from public.regions r
+  where p_include_inactive or r.is_active = true
+  order by r.name;
+end;
+$$;
+
+comment on function public.get_all_regions is 'Get all regions with cafe counts';
+
+-- ============================================================================
+-- 13. RPC: Create Franchise Partner
+-- ============================================================================
+
+create or replace function public.create_franchise_partner(
+  p_user_id uuid,
+  p_company_name text,
+  p_contact_person text,
+  p_email text,
+  p_phone text,
+  p_tax_id text default null,
+  p_commission_rate decimal default 10.00
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_franchise_id uuid;
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can create franchise partners';
+  end if;
+  
+  -- Validate inputs
+  if p_company_name is null or trim(p_company_name) = '' then
+    raise exception 'Company name is required';
+  end if;
+  
+  if p_contact_person is null or trim(p_contact_person) = '' then
+    raise exception 'Contact person is required';
+  end if;
+  
+  -- Create franchise partner
+  insert into public.franchise_partners (
+    user_id,
+    company_name,
+    contact_person,
+    email,
+    phone,
+    tax_id,
+    commission_rate
+  )
+  values (
+    p_user_id,
+    trim(p_company_name),
+    trim(p_contact_person),
+    trim(p_email),
+    trim(p_phone),
+    trim(p_tax_id),
+    p_commission_rate
+  )
+  returning id into v_franchise_id;
+  
+  return v_franchise_id;
+end;
+$$;
+
+comment on function public.create_franchise_partner is 'Create a new franchise partner (admin only)';
+
+-- ============================================================================
+-- 14. RPC: Update Franchise Partner
+-- ============================================================================
+
+create or replace function public.update_franchise_partner(
+  p_franchise_id uuid,
+  p_company_name text default null,
+  p_contact_person text default null,
+  p_email text default null,
+  p_phone text default null,
+  p_tax_id text default null,
+  p_commission_rate decimal default null,
+  p_status text default null,
+  p_notes text default null
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can update franchise partners';
+  end if;
+  
+  -- Update franchise partner
+  update public.franchise_partners
+  set
+    company_name = coalesce(trim(p_company_name), company_name),
+    contact_person = coalesce(trim(p_contact_person), contact_person),
+    email = coalesce(trim(p_email), email),
+    phone = coalesce(trim(p_phone), phone),
+    tax_id = coalesce(trim(p_tax_id), tax_id),
+    commission_rate = coalesce(p_commission_rate, commission_rate),
+    status = coalesce(p_status, status),
+    notes = coalesce(p_notes, notes),
+    updated_at = now()
+  where id = p_franchise_id;
+  
+  if not found then
+    raise exception 'Franchise partner not found';
+  end if;
+  
+  return true;
+end;
+$$;
+
+comment on function public.update_franchise_partner is 'Update franchise partner details (admin only)';
+
+-- ============================================================================
+-- 15. RPC: Get All Franchise Partners
+-- ============================================================================
+
+create or replace function public.get_all_franchise_partners(
+  p_status text default null,
+  p_limit int default 50,
+  p_offset int default 0
+)
+returns table(
+  franchise_id uuid,
+  user_id uuid,
+  user_email text,
+  company_name text,
+  contact_person text,
+  email text,
+  phone text,
+  commission_rate decimal,
+  status text,
+  region_count int,
+  cafe_count bigint,
+  created_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Only admins can view all franchise partners';
+  end if;
+  
+  return query
+  select
+    fp.id as franchise_id,
+    fp.user_id,
+    p.email as user_email,
+    fp.company_name,
+    fp.contact_person,
+    fp.email,
+    fp.phone,
+    fp.commission_rate,
+    fp.status,
+    array_length(fp.regions, 1) as region_count,
+    (
+      select count(*)
+      from public.cafes c
+      where c.owner_user_id = fp.user_id
+    ) as cafe_count,
+    fp.created_at
+  from public.franchise_partners fp
+  left join public.profiles p on p.id = fp.user_id
+  where p_status is null or fp.status = p_status
+  order by fp.created_at desc
+  limit p_limit
+  offset p_offset;
+end;
+$$;
+
+comment on function public.get_all_franchise_partners is 'Get all franchise partners (admin only)';
+
+-- ============================================================================
+-- 16. RPC: Get Franchise Partner Details
+-- ============================================================================
+
+create or replace function public.get_franchise_partner_details(p_franchise_id uuid)
+returns table(
+  franchise_id uuid,
+  user_id uuid,
+  user_email text,
+  company_name text,
+  contact_person text,
+  email text,
+  phone text,
+  tax_id text,
+  regions uuid[],
+  contract_number text,
+  contract_start_date date,
+  contract_end_date date,
+  commission_rate decimal,
+  status text,
+  notes text,
+  created_at timestamp with time zone,
+  updated_at timestamp with time zone
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Check if user is admin or the franchise partner themselves
+  if not (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    ) or exists (
+      select 1 from public.franchise_partners
+      where id = p_franchise_id and user_id = auth.uid()
+    )
+  ) then
+    raise exception 'Permission denied';
+  end if;
+  
+  return query
+  select
+    fp.id as franchise_id,
+    fp.user_id,
+    p.email as user_email,
+    fp.company_name,
+    fp.contact_person,
+    fp.email,
+    fp.phone,
+    fp.tax_id,
+    fp.regions,
+    fp.contract_number,
+    fp.contract_start_date,
+    fp.contract_end_date,
+    fp.commission_rate,
+    fp.status,
+    fp.notes,
+    fp.created_at,
+    fp.updated_at
+  from public.franchise_partners fp
+  left join public.profiles p on p.id = fp.user_id
+  where fp.id = p_franchise_id;
+end;
+$$;
+
+comment on function public.get_franchise_partner_details is 'Get detailed information about a franchise partner';
+
+-- ============================================================================
+-- 17. Seed Data: Default Regions
+-- ============================================================================
+
+-- Insert some default regions for testing
+insert into public.regions (name, city, country, timezone, latitude, longitude)
+values
+  ('Moscow Central', 'Moscow', 'Russia', 'Europe/Moscow', 55.7558, 37.6173),
+  ('Saint Petersburg', 'Saint Petersburg', 'Russia', 'Europe/Moscow', 59.9343, 30.3351),
+  ('Novosibirsk', 'Novosibirsk', 'Russia', 'Asia/Novosibirsk', 55.0084, 82.9357)
+on conflict (city, country) do nothing;
