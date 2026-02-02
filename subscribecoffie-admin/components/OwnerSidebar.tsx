@@ -43,6 +43,7 @@ export function OwnerSidebar({
       badge: cafesCount,
     },
     { name: 'Финансы', href: '/admin/owner/finances', icon: '💰' },
+    { name: 'Кошельки', href: '/admin/owner/wallets', icon: '💳' },
     {
       name: 'Уведомления',
       href: '/admin/owner/notifications',
