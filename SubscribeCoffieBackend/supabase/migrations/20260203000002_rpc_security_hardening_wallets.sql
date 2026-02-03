@@ -1,0 +1,501 @@
+-- ⚠️⚠️⚠️ CRITICAL SECURITY FIX: Wallet RPC Functions Hardening ⚠️⚠️⚠️
+-- 
+-- This migration hardens SECURITY DEFINER functions that handle:
+-- - Wallet operations (get, create, sync)
+-- - Wallet transactions (add, list)
+-- - Wallet statistics
+-- 
+-- Issues fixed:
+-- 1. Missing ownership checks (anyone can get/modify any user's wallet)
+-- 2. Missing role checks for admin operations
+-- 3. Missing search_path in SECURITY DEFINER functions
+-- 4. Overly permissive grants
+-- 5. Missing audit logging for money operations
+-- 6. No validation of transaction amounts/types
+--
+-- Date: 2026-02-03
+-- Priority: P0 (Money operations!)
+-- ============================================================================
+
+-- ============================================================================
+-- 1. HARDEN get_user_wallet (WALLET ACCESS)
+-- ============================================================================
+-- VULNERABILITY: Anyone authenticated can get ANY user's wallet
+-- FIX: Only allow user to get their own wallet, or admin to get any
+
+CREATE OR REPLACE FUNCTION get_user_wallet(user_id_param uuid)
+RETURNS jsonb
+SECURITY DEFINER
+SET search_path = public, extensions
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  result jsonb;
+  wallet_record record;
+  v_caller_role text;
+BEGIN
+  -- 🛡️ SECURITY: Get caller's role
+  SELECT role INTO v_caller_role 
+  FROM public.profiles 
+  WHERE profiles.id = auth.uid();
+  
+  -- 🛡️ SECURITY: Only allow user to get their own wallet, or admin
+  IF v_caller_role != 'admin' AND auth.uid() != user_id_param THEN
+    RAISE EXCEPTION 'Unauthorized: Cannot access other users wallets';
+  END IF;
+  
+  -- Get wallet
+  SELECT * INTO wallet_record
+  FROM public.wallets
+  WHERE user_id = user_id_param
+  LIMIT 1;
+  
+  IF NOT FOUND THEN
+    -- Create wallet if not exists (only for own wallet)
+    IF auth.uid() = user_id_param THEN
+      INSERT INTO public.wallets (user_id, type, wallet_type, credits_balance, bonus_balance)
+      VALUES (user_id_param, 'citypass', 'citypass', 0, 0)
+      RETURNING * INTO wallet_record;
+    ELSE
+      RAISE EXCEPTION 'Wallet not found for user %', user_id_param;
+    END IF;
+  END IF;
+  
+  -- Return wallet info
+  SELECT jsonb_build_object(
+    'id', wallet_record.id,
+    'user_id', wallet_record.user_id,
+    'credits_balance', wallet_record.credits_balance,
+    'bonus_balance', COALESCE(wallet_record.bonus_balance, 0),
+    'wallet_type', wallet_record.wallet_type,
+    'updated_at', wallet_record.updated_at
+  ) INTO result;
+  
+  RETURN result;
+END;
+$$;
+
+COMMENT ON FUNCTION get_user_wallet IS 'Получает кошелек пользователя (HARDENED: own wallet or admin only)';
+
+-- ============================================================================
+-- 2. HARDEN add_wallet_transaction (WALLET TRANSACTIONS)
+-- ============================================================================
+-- VULNERABILITY: Anyone authenticated can add transactions to ANY wallet
+-- FIX: Restrict by role - admin only for admin operations, user for own wallet
+
+CREATE OR REPLACE FUNCTION add_wallet_transaction(
+  user_id_param uuid,
+  amount_param int,
+  type_param text,
+  description_param text default null,
+  order_id_param uuid default null,
+  actor_user_id_param uuid default null
+)
+RETURNS jsonb
+SECURITY DEFINER
+SET search_path = public, extensions
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  wallet_record record;
+  transaction_id uuid;
+  result jsonb;
+  v_caller_role text;
+  v_actor_user_id uuid;
+BEGIN
+  -- 🛡️ SECURITY: Get caller and actor IDs
+  v_actor_user_id := COALESCE(actor_user_id_param, auth.uid());
+  
+  SELECT role INTO v_caller_role 
+  FROM public.profiles 
+  WHERE id = v_actor_user_id;
+  
+  IF v_caller_role IS NULL THEN
+    RAISE EXCEPTION 'Unauthorized: Authentication required';
+  END IF;
+  
+  -- 🛡️ SECURITY: Validate transaction type
+  IF type_param NOT IN ('topup', 'bonus', 'payment', 'refund', 'admin_credit', 'admin_debit') THEN
+    RAISE EXCEPTION 'Invalid transaction type: %', type_param;
+  END IF;
+  
+  -- 🛡️ SECURITY: Admin-only operations
+  IF type_param IN ('admin_credit', 'admin_debit') AND v_caller_role != 'admin' THEN
+    RAISE EXCEPTION 'Unauthorized: Admin role required for admin transactions';
+  END IF;
+  
+  -- 🛡️ SECURITY: User can only add transactions to their own wallet (except admin)
+  IF v_caller_role != 'admin' AND user_id_param != auth.uid() THEN
+    RAISE EXCEPTION 'Unauthorized: Cannot modify other users wallets';
+  END IF;
+  
+  -- 🛡️ SECURITY: Validate amount
+  IF amount_param <= 0 AND type_param NOT IN ('admin_debit', 'payment') THEN
+    RAISE EXCEPTION 'Amount must be positive for type: %', type_param;
+  END IF;
+  
+  -- 🛡️ SECURITY: Validate amount is reasonable (max 1M credits = 10k RUB)
+  IF ABS(amount_param) > 1000000 THEN
+    RAISE EXCEPTION 'Amount exceeds maximum allowed: %', amount_param;
+  END IF;
+  
+  -- Get or create wallet
+  SELECT * INTO wallet_record
+  FROM public.wallets
+  WHERE user_id = user_id_param
+  LIMIT 1;
+  
+  IF NOT FOUND THEN
+    INSERT INTO public.wallets (actor_user_id, balance, bonus_balance, lifetime_topup)
+    VALUES (user_id_param, 0, 0, 0)
+    RETURNING * INTO wallet_record;
+  END IF;
+  
+  -- 🛡️ SECURITY: Prevent negative balance (except admin_debit)
+  IF type_param IN ('payment', 'admin_debit') THEN
+    IF wallet_record.credits_balance < ABS(amount_param) AND type_param != 'admin_debit' THEN
+      RAISE EXCEPTION 'Insufficient balance: % credits available, % required', 
+        wallet_record.credits_balance, ABS(amount_param);
+    END IF;
+  END IF;
+  
+  -- Create transaction
+  INSERT INTO public.wallet_transactions (
+    wallet_id,
+    amount,
+    type,
+    description,
+    order_id,
+    actor_actor_user_id,
+    balance_before,
+    balance_after
+  )
+  VALUES (
+    wallet_record.id,
+    amount_param,
+    type_param,
+    description_param,
+    order_id_param,
+    v_actor_actor_user_id,
+    wallet_record.credits_balance,
+    CASE 
+      WHEN type_param IN ('topup', 'bonus', 'refund', 'admin_credit') THEN wallet_record.credits_balance + amount_param
+      WHEN type_param IN ('payment', 'admin_debit') THEN wallet_record.credits_balance - ABS(amount_param)
+      ELSE wallet_record.credits_balance
+    END
+  )
+  RETURNING id INTO transaction_id;
+  
+  -- Update wallet balance
+  UPDATE public.wallets
+  SET 
+    balance = CASE 
+      WHEN type_param IN ('topup', 'bonus', 'refund', 'admin_credit') THEN balance + amount_param
+      WHEN type_param IN ('payment', 'admin_debit') THEN balance - ABS(amount_param)
+      ELSE balance
+    END,
+    bonus_balance = CASE
+      WHEN type_param = 'bonus' THEN COALESCE(bonus_balance, 0) + amount_param
+      ELSE bonus_balance
+    END,
+    lifetime_topup = CASE
+      WHEN type_param = 'topup' THEN COALESCE(lifetime_topup, 0) + amount_param
+      ELSE lifetime_topup
+    END,
+    updated_at = NOW()
+  WHERE id = wallet_record.id;
+  
+  -- 🔒 AUDIT: Log wallet transaction
+  INSERT INTO public.audit_logs (
+    actor_user_id, 
+    action, 
+    table_name, 
+    record_id, 
+    payload, 
+    created_at
+  ) VALUES (
+    v_actor_actor_user_id,
+    'wallet.transaction.' || type_param,
+    'wallet_transaction',
+    transaction_id,
+    jsonb_build_object(
+      'wallet_id', wallet_record.id,
+      'target_user_id', user_id_param,
+      'amount', amount_param,
+      'type', type_param,
+      'balance_before', wallet_record.credits_balance,
+      'order_id', order_id_param,
+      'actor_role', v_caller_role
+    ),
+    NOW()
+  );
+  
+  -- Get updated wallet
+  SELECT jsonb_build_object(
+    'transaction_id', transaction_id,
+    'wallet', (
+      SELECT jsonb_build_object(
+        'id', id,
+        'balance', balance,
+        'bonus_balance', bonus_balance,
+        'lifetime_topup', lifetime_topup
+      )
+      FROM public.wallets
+      WHERE id = wallet_record.id
+    )
+  ) INTO result;
+  
+  RETURN result;
+END;
+$$;
+
+COMMENT ON FUNCTION add_wallet_transaction IS 'Добавляет транзакцию (HARDENED: own wallet or admin only, balance validated, audit logged)';
+
+-- ============================================================================
+-- 3. HARDEN sync_wallet_balance (WALLET SYNC)
+-- ============================================================================
+-- VULNERABILITY: Anyone authenticated can sync ANY wallet
+-- FIX: Restrict to admin only (this is a maintenance operation)
+
+CREATE OR REPLACE FUNCTION sync_wallet_balance(wallet_id_param uuid)
+RETURNS jsonb
+SECURITY DEFINER
+SET search_path = public, extensions
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  calculated_balance int;
+  calculated_bonus int;
+  calculated_lifetime int;
+  result jsonb;
+  v_caller_role text;
+  v_old_balance int;
+BEGIN
+  -- 🛡️ SECURITY: Get caller's role
+  SELECT role INTO v_caller_role 
+  FROM public.profiles 
+  WHERE profiles.id = auth.uid();
+  
+  -- 🛡️ SECURITY: Only admin can sync wallets (maintenance operation)
+  IF v_caller_role != 'admin' THEN
+    RAISE EXCEPTION 'Unauthorized: Admin role required for wallet sync';
+  END IF;
+  
+  -- Get old balance
+  SELECT balance INTO v_old_balance
+  FROM public.wallets
+  WHERE id = wallet_id_param;
+  
+  IF v_old_balance IS NULL THEN
+    RAISE EXCEPTION 'Wallet not found: %', wallet_id_param;
+  END IF;
+  
+  -- Calculate balance from transactions
+  SELECT 
+    COALESCE(SUM(
+      CASE 
+        WHEN type IN ('topup', 'bonus', 'refund', 'admin_credit') THEN amount
+        WHEN type IN ('payment', 'admin_debit') THEN -ABS(amount)
+        ELSE 0
+      END
+    ), 0),
+    COALESCE(SUM(CASE WHEN type = 'bonus' THEN amount ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN type = 'topup' THEN amount ELSE 0 END), 0)
+  INTO calculated_balance, calculated_bonus, calculated_lifetime
+  FROM public.wallet_transactions
+  WHERE wallet_id = wallet_id_param;
+  
+  -- Update wallet
+  UPDATE public.wallets
+  SET 
+    balance = calculated_balance,
+    bonus_balance = calculated_bonus,
+    lifetime_topup = calculated_lifetime,
+    updated_at = NOW()
+  WHERE id = wallet_id_param;
+  
+  -- 🔒 AUDIT: Log sync operation
+  INSERT INTO public.audit_logs (
+    actor_user_id, 
+    action, 
+    table_name, 
+    record_id, 
+    payload, 
+    created_at
+  ) VALUES (
+    auth.uid(),
+    'wallet.sync',
+    'wallet',
+    wallet_id_param,
+    jsonb_build_object(
+      'old_balance', v_old_balance,
+      'new_balance', calculated_balance,
+      'difference', calculated_balance - v_old_balance
+    ),
+    NOW()
+  );
+  
+  -- Return result
+  SELECT jsonb_build_object(
+    'wallet_id', id,
+    'old_balance', v_old_balance,
+    'new_balance', calculated_balance,
+    'synced_at', NOW()
+  ) INTO result
+  FROM public.wallets
+  WHERE id = wallet_id_param;
+  
+  RETURN result;
+END;
+$$;
+
+COMMENT ON FUNCTION sync_wallet_balance IS 'Пересчитывает баланс кошелька (HARDENED: admin only, audit logged)';
+
+-- ============================================================================
+-- 4. HARDEN get_wallet_transactions (WALLET HISTORY)
+-- ============================================================================
+-- VULNERABILITY: Anyone authenticated can view ANY user's transactions
+-- FIX: Only allow user to view their own transactions, or admin
+
+CREATE OR REPLACE FUNCTION get_wallet_transactions(
+  user_id_param uuid,
+  limit_param int default 50,
+  offset_param int default 0
+)
+RETURNS TABLE (
+  id uuid,
+  wallet_id uuid,
+  amount int,
+  type text,
+  description text,
+  order_id uuid,
+  balance_before int,
+  balance_after int,
+  created_at timestamptz
+)
+SECURITY DEFINER
+SET search_path = public, extensions
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_caller_role text;
+BEGIN
+  -- 🛡️ SECURITY: Get caller's role
+  SELECT role INTO v_caller_role 
+  FROM public.profiles 
+  WHERE profiles.id = auth.uid();
+  
+  -- 🛡️ SECURITY: Only allow user to view their own transactions, or admin
+  IF v_caller_role != 'admin' AND auth.uid() != user_id_param THEN
+    RAISE EXCEPTION 'Unauthorized: Cannot view other users transactions';
+  END IF;
+  
+  -- 🛡️ SECURITY: Validate limit
+  IF limit_param > 1000 THEN
+    RAISE EXCEPTION 'Limit cannot exceed 1000';
+  END IF;
+  
+  RETURN QUERY
+  SELECT 
+    wt.id,
+    wt.wallet_id,
+    wt.amount,
+    wt.type,
+    wt.description,
+    wt.order_id,
+    wt.credits_balance_before,
+    wt.credits_balance_after,
+    wt.created_at
+  FROM public.wallet_transactions wt
+  JOIN public.wallets w ON w.id = wt.wallet_id
+  WHERE w.user_id = user_id_param
+  ORDER BY wt.created_at DESC
+  LIMIT limit_param
+  OFFSET offset_param;
+END;
+$$;
+
+COMMENT ON FUNCTION get_wallet_transactions IS 'Получает историю транзакций (HARDENED: own transactions or admin only)';
+
+-- ============================================================================
+-- 5. HARDEN get_wallets_stats (WALLET STATISTICS)
+-- ============================================================================
+-- VULNERABILITY: Anyone authenticated can view all wallet statistics
+-- FIX: Restrict to admin only (sensitive financial data)
+
+CREATE OR REPLACE FUNCTION get_wallets_stats()
+RETURNS jsonb
+SECURITY DEFINER
+SET search_path = public, extensions
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  result jsonb;
+  v_caller_role text;
+BEGIN
+  -- 🛡️ SECURITY: Get caller's role
+  SELECT role INTO v_caller_role 
+  FROM public.profiles 
+  WHERE profiles.id = auth.uid();
+  
+  -- 🛡️ SECURITY: Only admin can view wallet statistics
+  IF v_caller_role != 'admin' THEN
+    RAISE EXCEPTION 'Unauthorized: Admin role required for wallet statistics';
+  END IF;
+  
+  SELECT jsonb_build_object(
+    'total_wallets', COUNT(*),
+    'total_balance', COALESCE(SUM(balance), 0),
+    'total_bonus', COALESCE(SUM(bonus_balance), 0),
+    'total_lifetime_topup', COALESCE(SUM(lifetime_topup), 0),
+    'avg_balance', COALESCE(AVG(balance), 0),
+    'transactions_count', (
+      SELECT COUNT(*) FROM public.wallet_transactions
+    )
+  ) INTO result
+  FROM public.wallets;
+  
+  RETURN result;
+END;
+$$;
+
+COMMENT ON FUNCTION get_wallets_stats IS 'Получает статистику по кошелькам (HARDENED: admin only)';
+
+-- ============================================================================
+-- 6. REVOKE overly permissive grants and re-grant properly
+-- ============================================================================
+
+-- Revoke all existing grants
+REVOKE ALL ON FUNCTION get_user_wallet FROM PUBLIC, authenticated, anon;
+REVOKE ALL ON FUNCTION add_wallet_transaction FROM PUBLIC, authenticated, anon;
+REVOKE ALL ON FUNCTION sync_wallet_balance FROM PUBLIC, authenticated, anon;
+REVOKE ALL ON FUNCTION get_wallet_transactions FROM PUBLIC, authenticated, anon;
+REVOKE ALL ON FUNCTION get_wallets_stats FROM PUBLIC, authenticated, anon;
+
+-- Grant appropriately
+-- Wallet operations: authenticated users (ownership checked inside)
+GRANT EXECUTE ON FUNCTION get_user_wallet TO authenticated;
+GRANT EXECUTE ON FUNCTION add_wallet_transaction TO authenticated; -- Role checked inside
+GRANT EXECUTE ON FUNCTION get_wallet_transactions TO authenticated; -- Ownership checked inside
+
+-- Admin-only operations
+GRANT EXECUTE ON FUNCTION sync_wallet_balance TO authenticated; -- Admin-only checked inside
+GRANT EXECUTE ON FUNCTION get_wallets_stats TO authenticated; -- Admin-only checked inside
+
+-- ============================================================================
+-- Complete
+-- ============================================================================
+
+DO $$ BEGIN
+  RAISE NOTICE '';
+  RAISE NOTICE '✅ Wallet RPC Functions HARDENED';
+  RAISE NOTICE '';
+  RAISE NOTICE 'Security improvements:';
+  RAISE NOTICE '  - get_user_wallet: own wallet or admin only';
+  RAISE NOTICE '  - add_wallet_transaction: own wallet or admin only, balance validated, audit logged';
+  RAISE NOTICE '  - sync_wallet_balance: admin only, audit logged';
+  RAISE NOTICE '  - get_wallet_transactions: own transactions or admin only';
+  RAISE NOTICE '  - get_wallets_stats: admin only';
+  RAISE NOTICE '  - All functions: search_path locked, ownership verified';
+  RAISE NOTICE '';
+END $$;

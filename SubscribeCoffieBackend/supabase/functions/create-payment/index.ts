@@ -1,3 +1,8 @@
+// ⚠️ SECURITY NOTICE ⚠️
+// This Edge Function handles REAL MONEY transactions
+// Only works when real_payment_integration migration is enabled
+// See: SubscribeCoffieBackend/PAYMENT_SECURITY.md
+//
 // Create Payment Edge Function
 // Creates payment intent with YooKassa or Stripe
 

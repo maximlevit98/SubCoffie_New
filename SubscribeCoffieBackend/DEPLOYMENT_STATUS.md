@@ -2,8 +2,253 @@
 
 ## Current Environment: Local Development
 
-**Status**: ✅ Ready for Cloud Deployment  
-**Last Updated**: 2026-01-30
+**Status**: ⚠️ Demo-Only Mode (Real Payments Disabled)  
+**Last Updated**: 2026-02-03
+
+---
+
+## ⚠️ PAYMENT STATUS
+
+### Current Mode: Mock Payments Only
+- ✅ **Demo/Test Ready**: Mock payments working
+- ❌ **Production Ready**: Real payments DISABLED by design
+- 🔒 **Security**: All safeguards in place
+
+**Real Payment Integration:**
+- Status: **INTENTIONALLY DISABLED**
+- Migration: `20260202010000_real_payment_integration.sql.disabled`
+- Feature Flag: `ENABLE_REAL_PAYMENTS=false`
+- Documentation: See `PAYMENT_SECURITY.md`
+
+**⚠️ DO NOT ENABLE real payments without:**
+1. Completing Pre-Production Checklist (PAYMENT_SECURITY.md)
+2. Technical + Business + Legal approvals
+3. Security audit completion
+
+### Mock Payment Infrastructure (DEV-ONLY)
+**Location:** `supabase/seed.sql` (auto-loaded in dev)  
+**Functions:** `mock_wallet_topup()`, `mock_direct_order_payment()`  
+**Behavior:** Instant credits, no real money, `provider='mock'`  
+**Production:** ❌ **MUST NOT DEPLOY** - seed.sql not run in production
+
+**Deployment Protection:**
+- ✅ Mock functions in seed.sql (dev-only)
+- ✅ Production migration clean (no mock references)
+- ✅ Separate file: `seed_dev_mock_payments.sql` (documentation)
+- ✅ Clear DEV-ONLY markers in all mock code
+
+**See:** `FIX_004_MOCK_PAYMENTS_SEPARATION.md` for details
+
+---
+
+## 🔐 SECRETS & ENVIRONMENT VARIABLES
+
+### Current Status: ✅ SECURE
+**Last Audit**: 2026-02-03  
+**Audit Result**: No secrets in repository
+
+### What's Protected:
+- ✅ NO service_role keys in code
+- ✅ NO payment provider keys (Stripe/YooKassa) in code
+- ✅ NO real database credentials in code
+- ✅ Local development uses standard Supabase local keys only
+
+### Configuration Files:
+
+#### iOS App (SubscribeCoffieClean)
+**File**: `ENV_CONFIGURATION.md`  
+**Current**: Hardcoded local Supabase anon key (SAFE for dev)  
+**Production**: Manual configuration required in `Environment.swift`  
+**Security**: ✅ NO service_role keys, NO payment keys
+
+#### Admin Panel (subscribecoffie-admin)
+**File**: `ENV_CONFIGURATION.md`  
+**Current**: Uses `process.env` (no hardcoded values)  
+**Required**: Create `.env.local` from template  
+**Security**: ✅ Service role key server-side only
+
+#### Edge Functions (SubscribeCoffieBackend)
+**File**: `supabase/functions/SECRETS_TEMPLATE.md`  
+**Current**: Uses `Deno.env.get()` (no hardcoded values)  
+**Required**: Set via `supabase secrets set`  
+**Security**: ✅ Secrets stored in Supabase Cloud, NOT in repo
+
+### How to Configure:
+
+**Local Development:**
+```bash
+# 1. Get keys from local Supabase
+cd SubscribeCoffieBackend
+supabase status
+
+# 2. Create admin panel .env.local
+cd ../subscribecoffie-admin
+cat > .env.local << EOF
+NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<from supabase status>
+SUPABASE_SERVICE_ROLE_KEY=<from supabase status>
+EOF
+
+# 3. iOS app uses hardcoded local keys (no action needed)
+```
+
+**Production:**
+```bash
+# 1. Set Edge Function secrets
+supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<production_service_role_key>
+supabase secrets set ENABLE_REAL_PAYMENTS=false
+
+# 2. Configure admin panel via hosting platform (Vercel/Netlify)
+# Set environment variables in dashboard
+
+# 3. Update iOS Environment.swift with production URL and anon key
+# Edit: SubscribeCoffieClean/Helpers/Environment.swift
+```
+
+### Security Checklist:
+- [x] No secrets committed to git
+- [x] All sensitive keys use environment variables
+- [x] iOS only has anon key (never service_role)
+- [x] Admin panel service_role key server-side only
+- [x] Edge Functions use Supabase Secrets
+- [x] .env.local in .gitignore
+- [x] Configuration templates documented
+- [x] Security audit completed
+
+**See:**
+- iOS: `SubscribeCoffieClean/ENV_CONFIGURATION.md`
+- Admin: `subscribecoffie-admin/ENV_CONFIGURATION.md`
+- Edge Functions: `SubscribeCoffieBackend/supabase/functions/SECRETS_TEMPLATE.md`
+
+---
+
+## 🌱 SEED DATA MANAGEMENT
+
+### Development Seeds (Local Only)
+
+**File:** `supabase/seed.sql`  
+**Purpose:** Create test data for local development  
+**Auto-runs:** ✅ Automatically on `supabase db reset`  
+**Contains:**
+- Test owner user (levitm@algsoft.ru / 1234567890)
+- Test account and profile
+- 2 test cafes (1 published, 1 draft)
+- 16 sample menu items
+- 1 test order
+- Mock payment functions (DEV-ONLY)
+
+**🔒 Safety:**
+- ✅ Never runs in production
+- ✅ Local development only
+- ✅ Contains obvious test data (test emails, fake cafes)
+- ✅ Mock functions clearly marked as DEV-ONLY
+
+### Production Seeds (Manual Only)
+
+**File:** `supabase/seed.production.sql`  
+**Purpose:** Initialize ONLY essential configuration in production  
+**Auto-runs:** ❌ NEVER (manual execution only)  
+**Contains:**
+- Commission rates configuration (7.5%, 4.0%, 17.5%)
+- System configuration (if applicable)
+- NO test users, NO test cafes, NO test data
+
+**🛡️ Safety Mechanisms:**
+1. **Port check** - Aborts if detected port 54322 (local Supabase)
+2. **Test user detection** - Warns if test emails found
+3. **Manual execution only** - Must be run in Supabase Dashboard → SQL Editor
+4. **Explicit warnings** - Clear instructions to prevent accidents
+5. **No automation** - CANNOT be run via scripts or CI/CD
+
+### How to Apply Production Seed
+
+**⚠️ CRITICAL: Only run this ONCE after initial production deployment**
+
+```bash
+# Step 1: Deploy migrations first
+cd SubscribeCoffieBackend
+supabase db push
+
+# Step 2: Verify migrations applied
+supabase db list
+
+# Step 3: Go to Supabase Dashboard
+# Navigate to: Dashboard → SQL Editor
+
+# Step 4: Copy content of seed.production.sql
+cat supabase/seed.production.sql
+
+# Step 5: Paste into SQL Editor and review EVERY line
+
+# Step 6: Run manually (click "Run" button)
+
+# Step 7: Verify output shows:
+#   ✅ Safety checks passed
+#   ✅ Commission config set
+#   ✅ Production seed complete
+```
+
+### Seed Data Protection Rules
+
+**✅ ALLOWED in Production Seeds:**
+- Configuration tables (commission_config, system_config)
+- Reference data (categories, tags, constants)
+- Default notification templates
+- System-wide settings
+
+**❌ FORBIDDEN in Production Seeds:**
+- Test user accounts
+- Fake cafe data
+- Sample menu items
+- Test orders
+- Mock payment methods
+- Development credentials
+- Hardcoded test data
+
+**✅ Real Production Data Comes From:**
+- User registrations (auth flow)
+- Cafe onboarding (owner panel)
+- Real orders (iOS app)
+- Actual menu uploads (owner panel)
+- Real payment transactions (when enabled)
+
+### Emergency: If Test Data Accidentally Applied
+
+**If you ran seed.sql in production by mistake:**
+
+```sql
+-- 1. Immediately delete test users
+DELETE FROM auth.users 
+WHERE email LIKE '%@test.com' 
+   OR email LIKE '%@example.com'
+   OR email = 'levitm@algsoft.ru';
+
+-- 2. Delete test profiles
+DELETE FROM profiles 
+WHERE email LIKE '%@test.com' 
+   OR email LIKE '%@example.com'
+   OR email = 'levitm@algsoft.ru';
+
+-- 3. Delete test cafes
+DELETE FROM cafes 
+WHERE name LIKE 'Test%' 
+   OR name LIKE '%Demo%';
+
+-- 4. Delete test orders
+DELETE FROM orders_core 
+WHERE customer_phone LIKE '+7999%';
+
+-- 5. Verify cleanup
+SELECT COUNT(*) FROM auth.users; -- Should be only real users
+SELECT COUNT(*) FROM cafes; -- Should be only real cafes
+```
+
+**Then:**
+1. Review all data
+2. Restore from backup if needed
+3. Re-run seed.production.sql properly
+4. Investigate how the mistake happened
+5. Update procedures to prevent recurrence
 
 ---
 

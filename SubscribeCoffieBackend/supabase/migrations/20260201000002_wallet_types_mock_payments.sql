@@ -1,6 +1,7 @@
--- Migration: Wallet Types + Mock Payment Infrastructure
--- Description: Adds support for two wallet types (CityPass and Cafe Wallet) and mock payment infrastructure
+-- Migration: Wallet Types + Payment Infrastructure (Production-Ready)
+-- Description: Adds support for two wallet types (CityPass and Cafe Wallet) and payment infrastructure
 -- Date: 2026-02-01
+-- Modified: 2026-02-03 - Separated mock functions to dev seed
 
 -- ============================================================================
 -- 1. Create wallet_networks table (networks of cafes)
@@ -98,22 +99,25 @@ comment on column public.wallets.cafe_id is 'For cafe_wallet: specific cafe this
 comment on column public.wallets.network_id is 'For cafe_wallet: network of cafes this wallet is tied to';
 
 -- ============================================================================
--- 4. Create payment_methods table (mock cards)
+-- 4. Create payment_methods table
 -- ============================================================================
 
 create table if not exists public.payment_methods (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users(id) on delete cascade not null,
   card_last4 text not null check (length(card_last4) = 4),
-  card_brand text not null, -- 'visa', 'mastercard', 'mir', 'mock'
+  card_brand text not null, -- 'visa', 'mastercard', 'mir'
   is_default boolean default false,
-  payment_provider text default 'mock' check (payment_provider in ('mock', 'stripe', 'yookassa')),
-  provider_token text, -- empty for mock, real token later
+  payment_provider text default 'stripe' check (payment_provider in ('stripe', 'yookassa')),
+  provider_token text, -- Provider-specific token
+  provider_payment_method_id text, -- For real payment integration
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
 );
 
-comment on table public.payment_methods is 'User payment methods (cards). Mock for MVP, real tokens later.';
+comment on table public.payment_methods is 'User payment methods (stored cards for real payments)';
+comment on column public.payment_methods.payment_provider is 'Payment provider: stripe or yookassa (no mock in production)';
+comment on column public.payment_methods.provider_token is 'Provider-specific token for charging';
 
 -- Enable RLS
 alter table public.payment_methods enable row level security;
@@ -141,12 +145,13 @@ create table if not exists public.payment_transactions (
   transaction_type text not null check (transaction_type in ('topup', 'order_payment', 'refund')),
   payment_method_id uuid references public.payment_methods(id) on delete set null,
   status text default 'pending' check (status in ('pending', 'completed', 'failed')),
-  provider_transaction_id text, -- mock UUID for now
+  provider_transaction_id text, -- Real transaction ID from provider
   created_at timestamp with time zone default now(),
   completed_at timestamp with time zone
 );
 
-comment on table public.payment_transactions is 'History of all payment transactions (mock and real)';
+comment on table public.payment_transactions is 'History of all payment transactions (real payments)';
+comment on column public.payment_transactions.provider_transaction_id is 'Transaction ID from payment provider (Stripe/YooKassa)';
 
 -- Enable RLS
 alter table public.payment_transactions enable row level security;
@@ -212,7 +217,7 @@ values
 on conflict (operation_type) do nothing;
 
 -- ============================================================================
--- 7. RPC Functions
+-- 7. Production RPC Functions (Business Logic)
 -- ============================================================================
 
 -- Function: calculate_commission
@@ -331,129 +336,6 @@ begin
 end;
 $$;
 
--- Function: mock_wallet_topup (simulates payment)
-create or replace function public.mock_wallet_topup(
-  p_wallet_id uuid,
-  p_amount int,
-  p_payment_method_id uuid default null
-)
-returns jsonb
-language plpgsql
-security definer
-as $$
-declare
-  v_user_id uuid;
-  v_wallet_type wallet_type;
-  v_commission int;
-  v_amount_credited int;
-  v_transaction_id uuid;
-  v_mock_provider_id text;
-begin
-  -- Get wallet info
-  select user_id, wallet_type into v_user_id, v_wallet_type
-  from public.wallets
-  where id = p_wallet_id;
-
-  if v_user_id is null then
-    raise exception 'Wallet not found';
-  end if;
-
-  -- Calculate commission
-  v_commission := public.calculate_commission(p_amount, 'topup', v_wallet_type);
-  v_amount_credited := p_amount - v_commission;
-
-  -- Generate mock provider transaction ID
-  v_mock_provider_id := 'mock_' || gen_random_uuid()::text;
-
-  -- Create transaction record
-  insert into public.payment_transactions (
-    user_id, wallet_id, amount_credits, commission_credits,
-    transaction_type, payment_method_id, status, provider_transaction_id, completed_at
-  )
-  values (
-    v_user_id, p_wallet_id, p_amount, v_commission,
-    'topup', p_payment_method_id, 'completed', v_mock_provider_id, now()
-  )
-  returning id into v_transaction_id;
-
-  -- Update wallet balance
-  update public.wallets
-  set
-    balance_credits = balance_credits + v_amount_credited,
-    lifetime_top_up_credits = lifetime_top_up_credits + v_amount_credited,
-    updated_at = now()
-  where id = p_wallet_id;
-
-  -- Return result
-  return jsonb_build_object(
-    'success', true,
-    'transaction_id', v_transaction_id,
-    'amount', p_amount,
-    'commission', v_commission,
-    'amount_credited', v_amount_credited,
-    'provider_transaction_id', v_mock_provider_id
-  );
-end;
-$$;
-
--- Function: mock_direct_order_payment (simulates direct payment without wallet)
-create or replace function public.mock_direct_order_payment(
-  p_order_id uuid,
-  p_amount int,
-  p_payment_method_id uuid default null
-)
-returns jsonb
-language plpgsql
-security definer
-as $$
-declare
-  v_user_id uuid;
-  v_commission int;
-  v_transaction_id uuid;
-  v_mock_provider_id text;
-begin
-  -- Get order user_id
-  select user_id into v_user_id
-  from public.orders_core
-  where id = p_order_id;
-
-  if v_user_id is null then
-    raise exception 'Order not found';
-  end if;
-
-  -- Calculate commission for direct order
-  v_commission := public.calculate_commission(p_amount, 'direct_order');
-
-  -- Generate mock provider transaction ID
-  v_mock_provider_id := 'mock_' || gen_random_uuid()::text;
-
-  -- Create transaction record
-  insert into public.payment_transactions (
-    user_id, order_id, amount_credits, commission_credits,
-    transaction_type, payment_method_id, status, provider_transaction_id, completed_at
-  )
-  values (
-    v_user_id, p_order_id, p_amount, v_commission,
-    'order_payment', p_payment_method_id, 'completed', v_mock_provider_id, now()
-  )
-  returning id into v_transaction_id;
-
-  -- Update order status to paid (if it exists in orders_core)
-  update public.orders_core
-  set status = 'created', updated_at = now()
-  where id = p_order_id;
-
-  -- Return result
-  return jsonb_build_object(
-    'success', true,
-    'transaction_id', v_transaction_id,
-    'amount', p_amount,
-    'commission', v_commission,
-    'provider_transaction_id', v_mock_provider_id
-  );
-end;
-$$;
-
 -- Function: validate_wallet_for_order (checks if wallet can be used for this cafe)
 create or replace function public.validate_wallet_for_order(
   p_wallet_id uuid,
@@ -557,7 +439,11 @@ create index if not exists wallets_network_id_idx on public.wallets(network_id) 
 comment on function public.calculate_commission is 'Calculates commission for an operation based on config';
 comment on function public.create_citypass_wallet is 'Creates a universal CityPass wallet for user';
 comment on function public.create_cafe_wallet is 'Creates a Cafe Wallet tied to specific cafe or network';
-comment on function public.mock_wallet_topup is 'Mock simulation of wallet top-up payment (for MVP)';
-comment on function public.mock_direct_order_payment is 'Mock simulation of direct order payment without wallet (for MVP)';
 comment on function public.validate_wallet_for_order is 'Validates if wallet can be used for order at this cafe';
 comment on function public.get_user_wallets is 'Returns all wallets for user with details';
+
+-- ============================================================================
+-- IMPORTANT: Mock payment functions moved to supabase/seed_dev_mock_payments.sql
+-- These functions are for DEVELOPMENT ONLY and should NOT be deployed to production
+-- See: PAYMENT_SECURITY.md for deployment guidelines
+-- ============================================================================

@@ -353,3 +353,131 @@ BEGIN
   RAISE NOTICE '';
 
 END $$;
+
+-- ============================================================================
+-- DEV-ONLY: Mock Payment Functions
+-- ============================================================================
+-- These functions simulate instant payment processing without real money
+-- Required for: local development, demos, testing
+-- Production: These functions should NOT exist in production
+-- See: PAYMENT_SECURITY.md and seed_dev_mock_payments.sql
+-- ============================================================================
+
+DO $$
+BEGIN
+  RAISE NOTICE '';
+  RAISE NOTICE '🚨 Loading DEV-ONLY mock payment functions...';
+END $$;
+
+-- Function: mock_wallet_topup (simulates payment)
+CREATE OR REPLACE FUNCTION public.mock_wallet_topup(
+  p_wallet_id uuid,
+  p_amount int,
+  p_payment_method_id uuid DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_wallet_type wallet_type;
+  v_commission int;
+  v_amount_credited int;
+  v_transaction_id uuid;
+  v_mock_provider_id text;
+BEGIN
+  SELECT user_id, wallet_type INTO v_user_id, v_wallet_type
+  FROM public.wallets WHERE id = p_wallet_id;
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Wallet not found';
+  END IF;
+
+  v_commission := public.calculate_commission(p_amount, 'topup', v_wallet_type);
+  v_amount_credited := p_amount - v_commission;
+  v_mock_provider_id := 'mock_' || gen_random_uuid()::text;
+
+  INSERT INTO public.payment_transactions (
+    user_id, wallet_id, amount_credits, commission_credits,
+    transaction_type, payment_method_id, status, provider_transaction_id, completed_at
+  ) VALUES (
+    v_user_id, p_wallet_id, p_amount, v_commission,
+    'topup', p_payment_method_id, 'completed', v_mock_provider_id, NOW()
+  ) RETURNING id INTO v_transaction_id;
+
+  UPDATE public.wallets
+  SET
+    balance_credits = balance_credits + v_amount_credited,
+    lifetime_top_up_credits = lifetime_top_up_credits + v_amount_credited,
+    updated_at = NOW()
+  WHERE id = p_wallet_id;
+
+  RETURN jsonb_build_object(
+    'success', true, 'transaction_id', v_transaction_id,
+    'amount', p_amount, 'commission', v_commission,
+    'amount_credited', v_amount_credited,
+    'provider_transaction_id', v_mock_provider_id,
+    'provider', 'mock', 'mock_mode', true
+  );
+END;
+$$;
+
+-- Function: mock_direct_order_payment
+CREATE OR REPLACE FUNCTION public.mock_direct_order_payment(
+  p_order_id uuid,
+  p_amount int,
+  p_payment_method_id uuid DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_commission int;
+  v_transaction_id uuid;
+  v_mock_provider_id text;
+BEGIN
+  SELECT user_id INTO v_user_id FROM public.orders_core WHERE id = p_order_id;
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Order not found';
+  END IF;
+
+  v_commission := public.calculate_commission(p_amount, 'direct_order');
+  v_mock_provider_id := 'mock_' || gen_random_uuid()::text;
+
+  INSERT INTO public.payment_transactions (
+    user_id, order_id, amount_credits, commission_credits,
+    transaction_type, payment_method_id, status, provider_transaction_id, completed_at
+  ) VALUES (
+    v_user_id, p_order_id, p_amount, v_commission,
+    'order_payment', p_payment_method_id, 'completed', v_mock_provider_id, NOW()
+  ) RETURNING id INTO v_transaction_id;
+
+  UPDATE public.orders_core
+  SET payment_status = 'paid', updated_at = NOW()
+  WHERE id = p_order_id;
+
+  RETURN jsonb_build_object(
+    'success', true, 'transaction_id', v_transaction_id,
+    'amount', p_amount, 'commission', v_commission,
+    'provider_transaction_id', v_mock_provider_id,
+    'provider', 'mock', 'mock_mode', true
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.mock_wallet_topup(uuid, int, uuid) TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION public.mock_direct_order_payment(uuid, int, uuid) TO authenticated, anon;
+
+COMMENT ON FUNCTION public.mock_wallet_topup IS '🚨 DEV-ONLY: Mock simulation of wallet top-up (instant, no real money)';
+COMMENT ON FUNCTION public.mock_direct_order_payment IS '🚨 DEV-ONLY: Mock simulation of direct payment (instant, no real money)';
+
+DO $$
+BEGIN
+  RAISE NOTICE '✅ Mock payment functions loaded (DEV environment only)';
+  RAISE NOTICE '⚠️  These provide instant credits WITHOUT real money';
+END $$;
+

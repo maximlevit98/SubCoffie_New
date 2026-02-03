@@ -1,3 +1,31 @@
+-- ⚠️ ⚠️ ⚠️ CRITICAL SECURITY NOTICE ⚠️ ⚠️ ⚠️
+-- 
+-- This migration is INTENTIONALLY DISABLED (.disabled extension)
+-- 
+-- DO NOT ENABLE without completing Pre-Production Checklist:
+-- See: SubscribeCoffieBackend/PAYMENT_SECURITY.md
+--
+-- Required approvals before enabling:
+-- [ ] Technical Lead - Security review
+-- [ ] Product Owner - Business requirements  
+-- [ ] Legal/Finance - Contracts & compliance
+--
+-- This migration adds REAL MONEY payment processing with:
+-- - YooKassa integration (Russian market)
+-- - Stripe integration (International)
+-- - Webhook event processing
+-- - Transaction confirmation/failure handling
+--
+-- Enabling this without proper setup will:
+-- ❌ Expose payment provider credentials
+-- ❌ Allow real money transactions
+-- ❌ Require PCI DSS compliance
+-- ❌ Need legal/contract setup
+--
+-- Current safe mode: mock payments (instant, no real money)
+--
+-- ⚠️ ⚠️ ⚠️ END SECURITY NOTICE ⚠️ ⚠️ ⚠️
+
 -- Migration: Real Payment Integration (YooKassa + Stripe)
 -- Description: Replaces mock payments with real payment provider integration
 -- Date: 2026-02-02

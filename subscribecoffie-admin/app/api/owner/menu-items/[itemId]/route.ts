@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase/server';
-import { getUserRole } from '@/lib/supabase/roles';
+import { 
+  requireOwnerOrAdmin, 
+  verifyMenuItemOwnership,
+  safeErrorResponse 
+} from '@/lib/supabase/roles';
 
 type RouteContext = {
   params: Promise<{ itemId: string }>;
@@ -9,17 +12,16 @@ type RouteContext = {
 // Update menu item (full update)
 export async function PUT(request: Request, context: RouteContext) {
   try {
-    const { role, userId } = await getUserRole();
-
-    if (role !== 'owner' || !userId) {
-      return NextResponse.json(
-        { error: 'Only owners can update menu items' },
-        { status: 403 }
-      );
+    // 🔐 SECURITY: Require owner or admin role
+    const authResult = await requireOwnerOrAdmin();
+    if (authResult instanceof NextResponse) {
+      return authResult; // Return 401/403 error
     }
 
+    const { userId, role, supabase } = authResult;
     const { itemId } = await context.params;
     const body = await request.json();
+
     const {
       name,
       title,
@@ -33,34 +35,13 @@ export async function PUT(request: Request, context: RouteContext) {
       sizes,
     } = body;
 
-    const supabase = await createServerClient();
-
-    // Get menu item and verify ownership
-    const { data: menuItem } = await supabase
-      .from('menu_items')
-      .select('cafe_id, cafes(account_id)')
-      .eq('id', itemId)
-      .single();
-
-    if (!menuItem) {
-      return NextResponse.json(
-        { error: 'Menu item not found' },
-        { status: 404 }
-      );
+    // 🔐 SECURITY: Verify menu item ownership (admins bypass)
+    const ownershipResult = await verifyMenuItemOwnership(supabase, userId, role, itemId);
+    if (ownershipResult instanceof NextResponse) {
+      return ownershipResult; // Return 403/404 error
     }
 
-    const { data: account } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('id', (menuItem.cafes as any).account_id)
-      .eq('owner_user_id', userId)
-      .single();
-
-    if (!account) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
-    // Update menu item
+    // Update menu item (RLS will also enforce this on DB level)
     const { data: updated, error: updateError } = await supabase
       .from('menu_items')
       .update({
@@ -80,11 +61,8 @@ export async function PUT(request: Request, context: RouteContext) {
       .single();
 
     if (updateError) {
-      console.error('Menu item update error:', updateError);
-      return NextResponse.json(
-        { error: 'Failed to update menu item', details: updateError.message },
-        { status: 500 }
-      );
+      // Safe error response (no SQL details leaked)
+      return safeErrorResponse(updateError, 'Failed to update menu item');
     }
 
     return NextResponse.json({
@@ -93,57 +71,31 @@ export async function PUT(request: Request, context: RouteContext) {
       message: 'Menu item updated successfully',
     });
   } catch (error) {
-    console.error('Menu item update API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    // Safe error response (no internal details leaked)
+    return safeErrorResponse(error, 'Internal server error');
   }
 }
 
 // Partial update (e.g., toggle availability)
 export async function PATCH(request: Request, context: RouteContext) {
   try {
-    const { role, userId } = await getUserRole();
-
-    if (role !== 'owner' || !userId) {
-      return NextResponse.json(
-        { error: 'Only owners can update menu items' },
-        { status: 403 }
-      );
+    // 🔐 SECURITY: Require owner or admin role
+    const authResult = await requireOwnerOrAdmin();
+    if (authResult instanceof NextResponse) {
+      return authResult; // Return 401/403 error
     }
 
+    const { userId, role, supabase } = authResult;
     const { itemId } = await context.params;
     const body = await request.json();
 
-    const supabase = await createServerClient();
-
-    // Get menu item and verify ownership
-    const { data: menuItem } = await supabase
-      .from('menu_items')
-      .select('cafe_id, cafes(account_id)')
-      .eq('id', itemId)
-      .single();
-
-    if (!menuItem) {
-      return NextResponse.json(
-        { error: 'Menu item not found' },
-        { status: 404 }
-      );
+    // 🔐 SECURITY: Verify menu item ownership (admins bypass)
+    const ownershipResult = await verifyMenuItemOwnership(supabase, userId, role, itemId);
+    if (ownershipResult instanceof NextResponse) {
+      return ownershipResult; // Return 403/404 error
     }
 
-    const { data: account } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('id', (menuItem.cafes as any).account_id)
-      .eq('owner_user_id', userId)
-      .single();
-
-    if (!account) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
-    // Update only provided fields
+    // Update only provided fields (RLS will also enforce this on DB level)
     const { data: updated, error: updateError } = await supabase
       .from('menu_items')
       .update(body)
@@ -152,11 +104,8 @@ export async function PATCH(request: Request, context: RouteContext) {
       .single();
 
     if (updateError) {
-      console.error('Menu item patch error:', updateError);
-      return NextResponse.json(
-        { error: 'Failed to update menu item', details: updateError.message },
-        { status: 500 }
-      );
+      // Safe error response (no SQL details leaked)
+      return safeErrorResponse(updateError, 'Failed to update menu item');
     }
 
     return NextResponse.json({
@@ -165,66 +114,38 @@ export async function PATCH(request: Request, context: RouteContext) {
       message: 'Menu item updated successfully',
     });
   } catch (error) {
-    console.error('Menu item patch API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    // Safe error response (no internal details leaked)
+    return safeErrorResponse(error, 'Internal server error');
   }
 }
 
 // Delete menu item
 export async function DELETE(request: Request, context: RouteContext) {
   try {
-    const { role, userId } = await getUserRole();
-
-    if (role !== 'owner' || !userId) {
-      return NextResponse.json(
-        { error: 'Only owners can delete menu items' },
-        { status: 403 }
-      );
+    // 🔐 SECURITY: Require owner or admin role
+    const authResult = await requireOwnerOrAdmin();
+    if (authResult instanceof NextResponse) {
+      return authResult; // Return 401/403 error
     }
 
+    const { userId, role, supabase } = authResult;
     const { itemId } = await context.params;
-    const supabase = await createServerClient();
 
-    // Get menu item and verify ownership
-    const { data: menuItem } = await supabase
-      .from('menu_items')
-      .select('cafe_id, cafes(account_id)')
-      .eq('id', itemId)
-      .single();
-
-    if (!menuItem) {
-      return NextResponse.json(
-        { error: 'Menu item not found' },
-        { status: 404 }
-      );
+    // 🔐 SECURITY: Verify menu item ownership (admins bypass)
+    const ownershipResult = await verifyMenuItemOwnership(supabase, userId, role, itemId);
+    if (ownershipResult instanceof NextResponse) {
+      return ownershipResult; // Return 403/404 error
     }
 
-    const { data: account } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('id', (menuItem.cafes as any).account_id)
-      .eq('owner_user_id', userId)
-      .single();
-
-    if (!account) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
-    // Delete menu item
+    // Delete menu item (RLS will also enforce this on DB level)
     const { error: deleteError } = await supabase
       .from('menu_items')
       .delete()
       .eq('id', itemId);
 
     if (deleteError) {
-      console.error('Menu item delete error:', deleteError);
-      return NextResponse.json(
-        { error: 'Failed to delete menu item', details: deleteError.message },
-        { status: 500 }
-      );
+      // Safe error response (no SQL details leaked)
+      return safeErrorResponse(deleteError, 'Failed to delete menu item');
     }
 
     return NextResponse.json({
@@ -232,10 +153,7 @@ export async function DELETE(request: Request, context: RouteContext) {
       message: 'Menu item deleted successfully',
     });
   } catch (error) {
-    console.error('Menu item delete API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    // Safe error response (no internal details leaked)
+    return safeErrorResponse(error, 'Internal server error');
   }
 }

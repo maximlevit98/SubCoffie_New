@@ -2,7 +2,6 @@
 
 import { useTransition, useState } from "react";
 import { updateCommissionRate } from "../../../lib/supabase/queries/payments";
-import { revalidatePath } from "next/cache";
 
 type CommissionFormProps = {
   operationType: string;

@@ -1,4 +1,12 @@
--- Enhance existing orders table for iOS checkout flow
+-- MIGRATION RENAMED FOR CLARITY: create_orders_table → enhance_orders_checkout_fields
+-- This migration DOES NOT create orders table - it enhances existing orders_core
+-- with fields needed for iOS checkout flow (order_number, customer_name, payment_method, etc.)
+-- 
+-- Prerequisites: 
+--   1. orders table must exist (created by 20260121000000_orders_mvp.sql)
+--   2. orders → orders_core rename (done by 20260123093000_rename_to_snake_case.sql)
+--
+-- Enhance existing orders_core table for iOS checkout flow
 -- Add missing fields needed for the new order creation flow
 
 -- Check if we're working with orders_core or orders table

@@ -41,7 +41,7 @@ export default async function OwnerDashboardPage() {
     todayRevenue = ordersToday?.reduce(
       (sum: number, order: any) => sum + (order.total_amount || 0),
       0
-    );
+    ) || 0;
 
     // Recent orders
     const { data: recentOrdersData } = await supabase

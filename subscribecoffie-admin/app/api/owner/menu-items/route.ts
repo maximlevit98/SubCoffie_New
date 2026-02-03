@@ -1,17 +1,19 @@
 import { NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase/server';
-import { getUserRole } from '@/lib/supabase/roles';
+import { 
+  requireOwnerOrAdmin, 
+  verifyCafeOwnership,
+  safeErrorResponse 
+} from '@/lib/supabase/roles';
 
 export async function POST(request: Request) {
   try {
-    const { role, userId } = await getUserRole();
-
-    if (role !== 'owner' || !userId) {
-      return NextResponse.json(
-        { error: 'Only owners can create menu items' },
-        { status: 403 }
-      );
+    // 🔐 SECURITY: Require owner or admin role
+    const authResult = await requireOwnerOrAdmin();
+    if (authResult instanceof NextResponse) {
+      return authResult; // Return 401/403 error
     }
+
+    const { userId, role, supabase } = authResult;
 
     const body = await request.json();
     const {
@@ -31,43 +33,25 @@ export async function POST(request: Request) {
     // Validation
     if (!cafe_id || !name || !description || !category) {
       return NextResponse.json(
-        { error: 'Missing required fields' },
+        { error: 'Missing required fields: cafe_id, name, description, category' },
         { status: 400 }
       );
     }
 
     if (!['drinks', 'food', 'syrups', 'merch'].includes(category)) {
       return NextResponse.json(
-        { error: 'Invalid category' },
+        { error: 'Invalid category. Must be one of: drinks, food, syrups, merch' },
         { status: 400 }
       );
     }
 
-    const supabase = await createServerClient();
-
-    // Verify cafe ownership
-    const { data: cafe } = await supabase
-      .from('cafes')
-      .select('account_id')
-      .eq('id', cafe_id)
-      .single();
-
-    if (!cafe) {
-      return NextResponse.json({ error: 'Cafe not found' }, { status: 404 });
+    // 🔐 SECURITY: Verify cafe ownership (admins bypass)
+    const ownershipError = await verifyCafeOwnership(supabase, userId, role, cafe_id);
+    if (ownershipError) {
+      return ownershipError; // Return 403/404 error
     }
 
-    const { data: account } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('id', cafe.account_id)
-      .eq('owner_user_id', userId)
-      .single();
-
-    if (!account) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
-    // Create menu item
+    // Create menu item (RLS will also enforce this on DB level)
     const { data: menuItem, error: createError } = await supabase
       .from('menu_items')
       .insert({
@@ -87,11 +71,8 @@ export async function POST(request: Request) {
       .single();
 
     if (createError) {
-      console.error('Menu item creation error:', createError);
-      return NextResponse.json(
-        { error: 'Failed to create menu item', details: createError.message },
-        { status: 500 }
-      );
+      // Safe error response (no SQL details leaked)
+      return safeErrorResponse(createError, 'Failed to create menu item');
     }
 
     return NextResponse.json({
@@ -100,10 +81,7 @@ export async function POST(request: Request) {
       message: 'Menu item created successfully',
     });
   } catch (error) {
-    console.error('Menu item creation API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    // Safe error response (no internal details leaked)
+    return safeErrorResponse(error, 'Internal server error');
   }
 }
