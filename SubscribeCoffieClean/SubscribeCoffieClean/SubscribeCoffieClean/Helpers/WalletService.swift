@@ -103,7 +103,9 @@ class WalletService: ObservableObject {
         throw NetworkError.decoding(NSError(domain: "WalletService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse wallet ID"]))
     }
     
-    /// Mock wallet top-up (simulates payment) - DEPRECATED, use createPaymentIntent instead
+    /// Mock wallet top-up (simulates payment) - DEMO MODE ONLY
+    /// For MVP: This is the ONLY payment method available (instant credits, no real money)
+    /// Real payments: Requires enabling backend real_payment_integration.sql and completing PAYMENT_SECURITY.md checklist
     func mockWalletTopup(walletId: UUID, amount: Int, paymentMethodId: UUID?) async throws -> MockTopupResponse {
         var params: [String: Any] = [
             "p_wallet_id": walletId.uuidString,
@@ -122,7 +124,16 @@ class WalletService: ObservableObject {
         return response
     }
     
-    /// Create payment intent for real payment processing
+    // MARK: - Real Payment Integration (DISABLED FOR MVP)
+    
+    /// ⚠️ DISABLED: Create payment intent for real payment processing
+    /// This function requires:
+    /// 1. Backend: Enable real_payment_integration.sql migration
+    /// 2. Backend: Enable create-payment Edge Function
+    /// 3. Backend: Complete PAYMENT_SECURITY.md checklist
+    /// 4. iOS: Restore PaymentService from _disabled_backup
+    /// Currently NOT WORKING - backend RPC does not exist
+    /*
     func createPaymentIntent(walletId: UUID, amount: Int, paymentMethodId: UUID?, description: String = "Wallet Top-Up") async throws -> PaymentIntentResponse {
         var params: [String: Any] = [
             "p_wallet_id": walletId.uuidString,
@@ -141,8 +152,11 @@ class WalletService: ObservableObject {
         
         return response
     }
+    */
     
-    /// Get transaction status
+    /// ⚠️ DISABLED: Get transaction status
+    /// Requires real payment integration to be enabled
+    /*
     func getTransactionStatus(transactionId: UUID) async throws -> TransactionStatusResponse {
         let response: TransactionStatusResponse = try await apiClient.rpc(
             "get_transaction_status",
@@ -151,6 +165,9 @@ class WalletService: ObservableObject {
         
         return response
     }
+    */
+    
+    // MARK: - Transaction History (Works with mock payments)
     
     /// Get user transaction history
     func getUserTransactionHistory(userId: UUID, limit: Int = 50, offset: Int = 0) async throws -> [PaymentTransaction] {

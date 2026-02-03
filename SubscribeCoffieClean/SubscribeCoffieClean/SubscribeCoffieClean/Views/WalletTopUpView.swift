@@ -2,26 +2,22 @@
 //  WalletTopUpView.swift
 //  SubscribeCoffieClean
 //
-//  View for topping up wallet with real payment integration
+//  DEMO MODE ONLY: Mock payments, no real money
+//  Real payment integration: See PAYMENT_SECURITY.md in backend
 //
 
 import SwiftUI
-import SafariServices
 
 struct WalletTopUpView: View {
     let wallet: Wallet
     
     @Environment(\.dismiss) private var dismiss
     @StateObject private var walletService = WalletService()
-    @StateObject private var paymentService = PaymentService()
     @State private var amountText: String = "500"
     @State private var isProcessing: Bool = false
     @State private var errorMessage: String?
     @State private var showSuccessAlert = false
     @State private var topupResult: MockTopupResponse?
-    @State private var paymentIntent: PaymentIntentResponse?
-    @State private var showPaymentWebView = false
-    @State private var useRealPayments = false // Toggle between mock and real payments
     
     private let presetAmounts: [Int] = [300, 500, 1000, 2000]
     private let maxAmount: Int = 99999
@@ -48,27 +44,8 @@ struct WalletTopUpView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    // Payment Mode Banner
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            Image(systemName: useRealPayments ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundColor(useRealPayments ? .green : .orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(useRealPayments ? "РЕАЛЬНАЯ ОПЛАТА" : "DEMO MODE")
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                Text(useRealPayments ? "Платёж будет обработан через платёжную систему" : "Реальная оплата не производится")
-                                    .font(.caption2)
-                            }
-                            Spacer()
-                        }
-                        
-                        Toggle("Использовать реальные платежи", isOn: $useRealPayments)
-                            .font(.caption)
-                    }
-                    .padding()
-                    .background((useRealPayments ? Color.green : Color.yellow).opacity(0.15))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    // DEMO MODE Banner (Always visible)
+                    demoBanner
                     
                     header
                     balanceBlock
@@ -97,17 +74,75 @@ struct WalletTopUpView: View {
                     }
                 }
             }
-            .alert("Пополнено! (Тестовый режим)", isPresented: $showSuccessAlert) {
+            .alert("✅ Кошелёк пополнен!", isPresented: $showSuccessAlert) {
                 Button("OK") {
                     dismiss()
                 }
             } message: {
                 if let result = topupResult {
-                    Text("Зачислено \(result.amount_credited ?? 0) ₽\nКомиссия: \(result.commission ?? 0) ₽")
+                    VStack(spacing: 8) {
+                        Text("🎉 Тестовое пополнение успешно")
+                        Text("Зачислено: \(result.amount_credited ?? 0) ₽")
+                        Text("Комиссия: \(result.commission ?? 0) ₽")
+                    }
                 }
             }
         }
     }
+    
+    // MARK: - Demo Banner
+    
+    private var demoBanner: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title2)
+                    .foregroundColor(.orange)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("DEMO MODE")
+                        .font(.headline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.orange)
+                    
+                    Text("Реальная оплата не производится")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    
+                    Text("Кредиты начисляются мгновенно для тестирования")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.yellow.opacity(0.15))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Color.orange.opacity(0.3), lineWidth: 1)
+                    )
+            )
+            
+            // Info about real payments
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                    
+                    Text("Для реальных платежей требуется интеграция с платёжной системой")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    
+    // MARK: - Header
     
     private var header: some View {
         VStack(spacing: 10) {
@@ -131,6 +166,8 @@ struct WalletTopUpView: View {
         .frame(maxWidth: .infinity)
     }
     
+    // MARK: - Balance Block
+    
     private var balanceBlock: some View {
         VStack(spacing: 8) {
             Text("Текущий баланс")
@@ -146,6 +183,8 @@ struct WalletTopUpView: View {
         .background(Color(.systemGray6))
         .cornerRadius(16)
     }
+    
+    // MARK: - Amount Grid
     
     private var amountGrid: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -180,6 +219,8 @@ struct WalletTopUpView: View {
         }
     }
     
+    // MARK: - Manual Input
+    
     private var manualInput: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Своя сумма")
@@ -201,6 +242,8 @@ struct WalletTopUpView: View {
                 }
         }
     }
+    
+    // MARK: - Commission Block
     
     private var commissionBlock: some View {
         VStack(spacing: 12) {
@@ -241,6 +284,8 @@ struct WalletTopUpView: View {
         .cornerRadius(12)
     }
     
+    // MARK: - Top-Up Button
+    
     private var topUpButton: some View {
         Button {
             Task { await performTopUp() }
@@ -249,20 +294,20 @@ struct WalletTopUpView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity)
             } else {
-                HStack {
-                    if !useRealPayments {
-                        Text("DEMO")
-                            .font(.caption)
-                            .fontWeight(.bold)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.yellow.opacity(0.2))
-                            .foregroundColor(.orange)
-                            .clipShape(Capsule())
-                    }
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.body)
                     
-                    Text(useRealPayments ? "Оплатить \(parsedAmount) ₽" : "Пополнить на \(parsedAmount) ₽")
+                    Text("Пополнить на \(parsedAmount) ₽")
                         .fontWeight(.semibold)
+                    
+                    Text("(DEMO)")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.2))
+                        .clipShape(Capsule())
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -274,6 +319,8 @@ struct WalletTopUpView: View {
         .disabled(parsedAmount <= 0 || isProcessing)
     }
     
+    // MARK: - Top-Up Logic
+    
     private func performTopUp() async {
         guard parsedAmount > 0 else { return }
         
@@ -281,101 +328,24 @@ struct WalletTopUpView: View {
         errorMessage = nil
         
         do {
-            if useRealPayments {
-                // Use real payment integration
-                let intent = try await walletService.createPaymentIntent(
-                    walletId: wallet.id,
-                    amount: parsedAmount,
-                    paymentMethodId: nil,
-                    description: "Пополнение \(wallet.displayTitle)"
-                )
-                
-                paymentIntent = intent
-                
-                // Process payment based on provider
-                switch intent.provider {
-                case .yookassa:
-                    if let confirmationUrl = intent.confirmationUrl,
-                       let url = URL(string: confirmationUrl) {
-                        // Open payment page in Safari
-                        await openPaymentURL(url)
-                        
-                        // Poll for payment status
-                        try await pollPaymentStatus(transactionId: intent.transactionId)
-                    }
-                    
-                case .stripe:
-                    errorMessage = "Stripe integration coming soon. Please use YooKassa or mock payments."
-                    isProcessing = false
-                    return
-                    
-                case .mock:
-                    // Mock payment completed immediately
-                    showSuccessAlert = true
-                }
-                
-                isProcessing = false
-                if errorMessage == nil {
-                    showSuccessAlert = true
-                }
-                
-            } else {
-                // Use mock payment (backward compatibility)
-                let result = try await walletService.mockWalletTopup(
-                    walletId: wallet.id,
-                    amount: parsedAmount,
-                    paymentMethodId: nil
-                )
-                
-                topupResult = result
-                showSuccessAlert = true
-                isProcessing = false
-            }
+            // Use mock payment (demo mode)
+            let result = try await walletService.mockWalletTopup(
+                walletId: wallet.id,
+                amount: parsedAmount,
+                paymentMethodId: nil
+            )
+            
+            topupResult = result
+            showSuccessAlert = true
+            isProcessing = false
+            
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "Ошибка: \(error.localizedDescription)"
             isProcessing = false
         }
     }
     
-    @MainActor
-    private func openPaymentURL(_ url: URL) async {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootViewController = windowScene.windows.first?.rootViewController else {
-            return
-        }
-        
-        let safariVC = SFSafariViewController(url: url)
-        rootViewController.present(safariVC, animated: true)
-        
-        // Store reference to dismiss later
-        showPaymentWebView = true
-    }
-    
-    private func pollPaymentStatus(transactionId: UUID) async throws {
-        var attempts = 0
-        let maxAttempts = 30
-        
-        while attempts < maxAttempts {
-            let status = try await walletService.getTransactionStatus(transactionId: transactionId)
-            
-            switch status.status {
-            case "completed":
-                // Payment successful
-                return
-            case "failed":
-                let errorMsg = status.providerErrorMessage ?? "Payment failed"
-                throw NetworkError.serverError(errorMsg)
-            case "pending":
-                // Continue polling
-                try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
-                attempts += 1
-            default:
-                throw NetworkError.serverError("Unknown status: \(status.status)")
-            }
-        }
-        
-        throw NetworkError.serverError("Payment timeout")
-    }
+    // MARK: - Helpers
     
     private var parsedAmount: Int {
         let value = Int(amountText) ?? 0
@@ -391,6 +361,8 @@ struct WalletTopUpView: View {
         }
     }
 }
+
+// MARK: - Preview
 
 #Preview {
     WalletTopUpView(

@@ -89,10 +89,13 @@ class AuthService: ObservableObject {
 
 // OrderService moved to separate file (Helpers/OrderService.swift)
 
-@MainActor
-class PaymentService: ObservableObject {
-    static let shared = PaymentService()
-}
+// PaymentService: See _disabled_backup/PaymentService.swift.disabled
+// For MVP: Using mock payments only (demo mode)
+// Real payment integration requires:
+// 1. Enable backend/supabase/migrations/20260202010000_real_payment_integration.sql
+// 2. Complete PAYMENT_SECURITY.md checklist
+// 3. Restore PaymentService from disabled backup
+// 4. Update WalletTopUpView to use real payment flow
 
 @MainActor
 class SocialService: ObservableObject {
