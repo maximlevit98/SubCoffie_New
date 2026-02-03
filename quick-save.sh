@@ -23,8 +23,8 @@ if [ ! -d ".git" ]; then
     exit 1
 fi
 
-# Check for changes
-if git diff-index --quiet HEAD --; then
+# Check for changes (including untracked files)
+if git diff-index --quiet HEAD -- 2>/dev/null && [ -z "$(git ls-files --others --exclude-standard)" ]; then
     echo -e "${GREEN}✅ No changes to commit. Working tree is clean!${NC}"
     echo ""
     echo "Last commit:"
