@@ -51,14 +51,14 @@ export default function OwnerInvitationsPage() {
       setIsLoading(true);
       setError(null);
 
-      // Load invitations
-      const { data: invData, error: invError } = await supabase
-        .from("owner_invitations")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (invError) throw invError;
-      setInvitations(invData || []);
+      // Load invitations via secure API route (not direct Supabase query)
+      const invResponse = await fetch('/api/admin/owner-invites');
+      if (!invResponse.ok) {
+        const errData = await invResponse.json();
+        throw new Error(errData.error || 'Failed to load invitations');
+      }
+      const invData = await invResponse.json();
+      setInvitations(invData.invitations || []);
 
       // Load cafes for dropdown
       const { data: cafesData, error: cafesError } = await supabase

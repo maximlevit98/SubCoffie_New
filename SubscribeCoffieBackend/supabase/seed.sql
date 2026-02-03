@@ -481,3 +481,32 @@ BEGIN
   RAISE NOTICE '⚠️  These provide instant credits WITHOUT real money';
 END $$;
 
+
+-- ============================================================================
+-- FIX ADMIN ROLE (added 2026-02-04)
+-- ============================================================================
+-- After db reset, admin@coffie.local role gets reset to 'user'
+-- This ensures it's always set to 'admin' for development
+-- ============================================================================
+
+DO $$
+DECLARE
+  v_admin_id uuid;
+BEGIN
+  -- Check if admin user exists
+  SELECT id INTO v_admin_id
+  FROM auth.users
+  WHERE email = 'admin@coffie.local';
+  
+  IF v_admin_id IS NOT NULL THEN
+    -- Update profile role to admin
+    UPDATE public.profiles
+    SET 
+      role = 'admin',
+      full_name = 'System Admin',
+      updated_at = NOW()
+    WHERE id = v_admin_id;
+    
+    RAISE NOTICE '✅ Admin role set for admin@cofAdmin user not found. Run scripts/create_first_admin.sql to create one.';
+  END IF;
+END $$;

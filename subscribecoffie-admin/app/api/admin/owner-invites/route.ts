@@ -87,10 +87,22 @@ export async function GET(request: Request) {
 
     const supabase = await createServerClient();
 
-    // Get all invitations
+    // Get invitations - EXCLUDE sensitive fields like token_hash
     const { data: invitations, error } = await supabase
       .from('owner_invitations')
-      .select('*')
+      .select(`
+        id,
+        email,
+        company_name,
+        cafe_id,
+        status,
+        expires_at,
+        created_at,
+        accepted_at,
+        accepted_by_user_id,
+        use_count,
+        max_uses
+      `)
       .order('created_at', { ascending: false });
 
     if (error) {

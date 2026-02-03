@@ -5,6 +5,10 @@ export type UserRole = "admin" | "owner" | "user";
 
 /**
  * Get current user's role and ID
+ * 
+ * Source of truth: public.profiles.role
+ * This is the ONLY place where roles are stored and checked.
+ * Backend invite system (redeem_owner_invitation RPC) assigns roles via profiles.role.
  */
 export async function getUserRole() {
   const supabase = await createServerClient();
@@ -18,25 +22,18 @@ export async function getUserRole() {
 
   const userId = user.id;
 
-  // Try to get role from user_roles table first (preferred)
-  const { data: userRoleData } = await supabase
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", userId)
-    .limit(1)
-    .maybeSingle();
-
-  if (userRoleData?.role) {
-    return { role: userRoleData.role as UserRole, userId };
-  }
-
-  // Fallback to profiles table for backward compatibility
-  const { data: profileData } = await supabase
+  // Read role ONLY from profiles table (single source of truth)
+  const { data: profileData, error: profileError } = await supabase
     .from("profiles")
     .select("role")
     .eq("id", userId)
     .limit(1)
     .maybeSingle();
+
+  if (profileError) {
+    console.error("Failed to fetch user role:", profileError);
+    return { role: null, userId: null };
+  }
 
   const role = (profileData?.role as UserRole | undefined) ?? null;
   return { role, userId };

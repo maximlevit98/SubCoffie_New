@@ -208,16 +208,11 @@ function OwnerRegistrationForm() {
           friendlyMessage = "🔐 Authentication failed. Please try again or contact support.";
         }
         
-        // Clean up: Delete user if invitation acceptance fails
-        // (Only if user was just created, don't delete existing users)
-        if (!acceptError.message.includes("already has owner role")) {
-          console.log("🧹 Cleaning up user account...");
-          try {
-            await supabase.auth.admin.deleteUser(signUpData.user.id);
-          } catch (cleanupError) {
-            console.error("⚠️ Failed to cleanup user:", cleanupError);
-          }
-        }
+        // ⚠️ SECURITY NOTE: We do NOT delete the user account here.
+        // Reason: auth.admin.deleteUser() requires service_role key and should NEVER be called from browser.
+        // The user account will remain in auth.users but WITHOUT owner role (safe).
+        // Admin can manually cleanup orphaned accounts if needed.
+        console.warn("⚠️ User account created but invitation failed. Manual cleanup may be needed for:", signUpData.user.id);
         
         throw new Error(friendlyMessage);
       }

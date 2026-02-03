@@ -13,24 +13,7 @@ export default async function LegacyAdminLayout({
       <header className="border-b border-zinc-200 bg-white px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold">SubscribeCoffie Admin</h1>
-          <div className="flex items-center gap-4">
-            {role === "owner" && (
-              <Link
-                href="/admin/owner/dashboard"
-                className="text-sm text-blue-600 hover:text-blue-700"
-              >
-                → Owner Panel
-              </Link>
-            )}
-            {role === "owner" && (
-              <Link
-                href="/cafe-owner/dashboard"
-                className="text-sm text-zinc-600 hover:text-zinc-700"
-              >
-                → Legacy Cafe Owner
-              </Link>
-            )}
-          </div>
+          {/* Removed owner panel links - strict context separation */}
         </div>
       </header>
       <div className="flex min-h-[calc(100vh-64px)]">
@@ -97,23 +80,7 @@ export default async function LegacyAdminLayout({
                 🏪 Заявки на подключение
               </Link>
             )}
-            <div className="my-2 border-t border-zinc-200"></div>
-            {(role === "owner" || role === "admin") && (
-              <Link
-                href="/admin/owner/dashboard"
-                className="rounded bg-blue-50 px-3 py-2 text-blue-700 hover:bg-blue-100"
-              >
-                👨‍💼 Owner Panel
-              </Link>
-            )}
-            {role === "admin" && (
-              <Link
-                href="/cafe-owner/dashboard"
-                className="rounded px-3 py-2 hover:bg-zinc-100"
-              >
-                🏪 Legacy Cafe Owner
-              </Link>
-            )}
+            {/* Removed "Owner Panel" and "Legacy Owner" links - admins stay in admin context */}
           </nav>
         </aside>
         <main className="flex-1 px-6 py-6">{children}</main>

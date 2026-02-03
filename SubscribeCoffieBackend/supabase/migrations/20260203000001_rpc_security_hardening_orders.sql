@@ -448,7 +448,8 @@ BEGIN
   END IF;
   
   -- 🛡️ SECURITY: Validate order_type
-  IF p_order_type NOT IN ('pickup', 'dine_in', 'takeaway') THEN
+  -- Must match orders_core_order_type_check constraint
+  IF p_order_type NOT IN ('now', 'preorder', 'subscription') THEN
     RAISE EXCEPTION 'Invalid order type: %', p_order_type;
   END IF;
   

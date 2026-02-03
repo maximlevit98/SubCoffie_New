@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
 
 import {
   getDashboardMetrics,
@@ -11,12 +12,25 @@ import {
 import { listCafes } from "../../../lib/supabase/queries/cafes";
 import { CafeSelectorClient } from "./CafeSelectorClient";
 import LegacyAdminLayout from "@/components/LegacyAdminLayout";
+import { getUserRole } from "@/lib/supabase/roles";
 
 type PageProps = {
   searchParams: Promise<{ cafe_id?: string }>;
 };
 
 export default async function DashboardPage({ searchParams }: PageProps) {
+  // ADMIN-ONLY GUARD
+  const { role, userId } = await getUserRole();
+  
+  if (!userId) {
+    redirect('/login');
+  }
+  
+  // Strict: only admin can access admin dashboard
+  if (role !== 'admin') {
+    redirect('/admin/owner/dashboard');
+  }
+  
   const params = await searchParams;
   const cafeId = params?.cafe_id;
 
@@ -291,7 +305,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
       </div>
 
       {/* Quick Links */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <QuickLink
           href="/admin/orders"
           title="Заказы"
@@ -309,6 +323,12 @@ export default async function DashboardPage({ searchParams }: PageProps) {
           title="Кафе"
           description="Управление кафе и меню"
           icon="☕"
+        />
+        <QuickLink
+          href="/admin/owner-invitations"
+          title="Owner Invitations"
+          description="Пригласить владельцев"
+          icon="👤"
         />
       </div>
     </section>

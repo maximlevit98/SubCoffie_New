@@ -57,28 +57,35 @@ export default function LoginPage() {
 
       console.log('✅ User signed in:', data.user.id, data.user.email);
 
-      // Fetch user role directly from database
-      console.log('🔍 Fetching user role...');
-      const { data: roleData, error: roleError } = await supabase
-        .from('user_roles')
+      // Fetch user role from profiles table (single source of truth)
+      console.log('🔍 Fetching user role from profiles...');
+      const { data: profileData, error: roleError } = await supabase
+        .from('profiles')
         .select('role')
-        .eq('user_id', data.user.id)
+        .eq('id', data.user.id)
         .single();
 
-      if (roleError) {
+      if (roleError || !profileData) {
         console.error('❌ Role fetch error:', roleError);
-        console.log('⚠️ Defaulting to admin dashboard');
-        // Default to admin dashboard if role not found
-        window.location.href = "/admin/dashboard";
+        setError('Аккаунт не активирован. Обратитесь к администратору.');
+        setIsLoading(false);
         return;
       }
 
-      console.log('✅ Role fetched:', roleData?.role);
+      const userRole = profileData.role;
+      console.log('✅ Role fetched:', userRole);
 
-      if (roleData?.role === 'owner') {
+      if (!userRole || (userRole !== 'admin' && userRole !== 'owner')) {
+        console.error('❌ No valid role assigned');
+        setError('Аккаунт не имеет доступа к админ-панели.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (userRole === 'owner') {
         console.log('🏢 Redirecting to owner dashboard');
         window.location.href = "/admin/owner/dashboard";
-      } else {
+      } else if (userRole === 'admin') {
         console.log('📊 Redirecting to admin dashboard');
         window.location.href = "/admin/dashboard";
       }
@@ -90,57 +97,9 @@ export default function LoginPage() {
   };
 
   const handleSignUp = async () => {
-    setError(null);
-    const validationError = validate();
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const supabase = createBrowserClient();
-      const { data, error: signUpError } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-      });
-
-      if (signUpError) {
-        setError(signUpError.message);
-        setIsLoading(false);
-        return;
-      }
-
-      if (!data?.user) {
-        setError("Не удалось создать пользователя");
-        setIsLoading(false);
-        return;
-      }
-
-      // Fetch user role directly from database
-      const { data: roleData, error: roleError } = await supabase
-        .from('user_roles')
-        .select('role')
-        .eq('user_id', data.user.id)
-        .single();
-
-      if (roleError) {
-        console.error('Role fetch error:', roleError);
-        // Default to admin dashboard if role not found
-        window.location.href = "/admin/dashboard";
-        return;
-      }
-
-      if (roleData?.role === 'owner') {
-        window.location.href = "/admin/owner/dashboard";
-      } else {
-        window.location.href = "/admin/dashboard";
-      }
-    } catch (err) {
-      console.error('Sign up error:', err);
-      setError(err instanceof Error ? err.message : "Не удалось создать аккаунт.");
-      setIsLoading(false);
-    }
+    // Dev signup is disabled - use invite system instead
+    setError("Создание админ-аккаунтов отключено. Используйте систему приглашений.");
+    return;
   };
 
   return (
@@ -193,14 +152,16 @@ export default function LoginPage() {
             >
               {isLoading ? "Входим..." : "Войти"}
             </button>
-            <button
-              type="button"
-              onClick={handleSignUp}
-              disabled={isLoading}
-              className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-60"
-            >
-              {isLoading ? "Создаём..." : "Создать админ-аккаунт (dev)"}
-            </button>
+            {process.env.NEXT_PUBLIC_ENABLE_DEV_SIGNUP === 'true' && (
+              <button
+                type="button"
+                onClick={handleSignUp}
+                disabled={isLoading}
+                className="rounded border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-60"
+              >
+                {isLoading ? "Создаём..." : "Создать админ-аккаунт (dev)"}
+              </button>
+            )}
           </div>
         </div>
       </div>

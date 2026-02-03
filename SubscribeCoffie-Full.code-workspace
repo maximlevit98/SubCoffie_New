@@ -1,0 +1,43 @@
+{
+  "folders": [
+    {
+      "path": "SubscribeCoffieBackend",
+      "name": "🔧 Backend (Supabase)"
+    },
+    {
+      "path": "SubscribeCoffieClean",
+      "name": "📱 iOS App (Swift)"
+    },
+    {
+      "path": "subscribecoffie-admin",
+      "name": "💻 Admin Panel (Next.js)"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/node_modules": true,
+      "**/.next": true,
+      "**/build": true,
+      "**/.git": false
+    },
+    "search.exclude": {
+      "**/node_modules": true,
+      "**/.next": true,
+      "**/build": true
+    },
+    "typescript.tsdk": "subscribecoffie-admin/node_modules/typescript/lib",
+    "files.associations": {
+      "*.sql": "sql",
+      "*.sh": "shellscript"
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "supabase.supabase-vscode",
+      "dbaeumer.vscode-eslint",
+      "esbenp.prettier-vscode",
+      "bradlc.vscode-tailwindcss",
+      "swift.swift-lang"
+    ]
+  }
+}

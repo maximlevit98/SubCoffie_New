@@ -14,9 +14,10 @@ export default async function OwnerLayout({
     redirect('/login');
   }
 
-  // Only owners and admins can access
-  if (role !== 'owner' && role !== 'admin') {
-    redirect('/login');
+  // STRICT: Only owners can access this area
+  // Admins must stay in /admin/* (no cross-context switching)
+  if (role !== 'owner') {
+    redirect('/admin/dashboard');
   }
 
   return (
@@ -28,18 +29,8 @@ export default async function OwnerLayout({
               ☕ SubscribeCoffie Owner
             </h1>
           </Link>
-          <div className="flex items-center gap-4">
-            {role === 'admin' && (
-              <Link
-                href="/admin/dashboard"
-                className="text-sm text-blue-600 hover:text-blue-700"
-              >
-                ← Admin Panel
-              </Link>
-            )}
-            <div className="rounded-lg bg-green-100 px-3 py-1 text-sm font-medium text-green-800">
-              Владелец
-            </div>
+          <div className="rounded-lg bg-green-100 px-3 py-1 text-sm font-medium text-green-800">
+            Владелец
           </div>
         </div>
       </header>
