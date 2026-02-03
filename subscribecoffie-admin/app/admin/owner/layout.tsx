@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { getUserRole } from '@/lib/supabase/roles';
+import { createServerClient } from '@/lib/supabase/server';
 
 export default async function OwnerLayout({
   children,
@@ -20,6 +21,16 @@ export default async function OwnerLayout({
     redirect('/admin/dashboard');
   }
 
+  // Get owner name from profile
+  const supabase = await createServerClient();
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('full_name, email')
+    .eq('id', userId)
+    .single();
+
+  const ownerName = profile?.full_name || profile?.email || 'Владелец';
+
   return (
     <div className="min-h-screen bg-zinc-50 font-sans text-zinc-900">
       <header className="border-b border-zinc-200 bg-white px-6 py-4">
@@ -29,8 +40,19 @@ export default async function OwnerLayout({
               ☕ SubscribeCoffie Owner
             </h1>
           </Link>
-          <div className="rounded-lg bg-green-100 px-3 py-1 text-sm font-medium text-green-800">
-            Владелец
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-zinc-600">
+              Привет, <strong>{ownerName}</strong>
+            </span>
+            <Link 
+              href="/admin/owner/settings"
+              className="text-sm text-blue-600 hover:text-blue-700 hover:underline"
+            >
+              ⚙️ Настройки
+            </Link>
+            <div className="rounded-lg bg-green-100 px-3 py-1 text-sm font-medium text-green-800">
+              Владелец
+            </div>
           </div>
         </div>
       </header>

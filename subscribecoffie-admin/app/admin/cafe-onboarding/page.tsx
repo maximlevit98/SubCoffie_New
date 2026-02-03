@@ -1,10 +1,32 @@
 import Link from "next/link";
 import { listOnboardingRequests } from "../../../lib/supabase/queries/cafe-onboarding";
+import { createServerClient } from "@/lib/supabase/server";
+import InviteOwnerButton from "./InviteOwnerButton";
 
 export const dynamic = "force-dynamic";
 
 export default async function CafeOnboardingPage() {
   const { data: requests, error } = await listOnboardingRequests();
+
+  // Load owner invitations for each request (by matching email)
+  const supabase = await createServerClient();
+  const { data: allInvites } = await supabase
+    .from("owner_invitations")
+    .select("id, email, status, expires_at, created_at, accepted_at")
+    .order("created_at", { ascending: false });
+
+  // Create a map of email -> latest invite
+  const invitesByEmail = new Map();
+  if (allInvites) {
+    for (const invite of allInvites) {
+      const email = invite.email?.toLowerCase();
+      if (!email) continue;
+      // Keep only the latest invite per email
+      if (!invitesByEmail.has(email)) {
+        invitesByEmail.set(email, invite);
+      }
+    }
+  }
 
   if (error) {
     return (
@@ -44,7 +66,11 @@ export default async function CafeOnboardingPage() {
           <h3 className="text-lg font-semibold text-yellow-700">В ожидании</h3>
           <div className="grid gap-4">
             {pendingRequests.map((request) => (
-              <RequestCard key={request.id} request={request} />
+              <RequestCard 
+                key={request.id} 
+                request={request} 
+                invitation={invitesByEmail.get(request.applicant_email?.toLowerCase())}
+              />
             ))}
           </div>
         </div>
@@ -56,7 +82,11 @@ export default async function CafeOnboardingPage() {
           <h3 className="text-lg font-semibold text-green-700">Одобрено</h3>
           <div className="grid gap-4">
             {approvedRequests.map((request) => (
-              <RequestCard key={request.id} request={request} />
+              <RequestCard 
+                key={request.id} 
+                request={request}
+                invitation={invitesByEmail.get(request.applicant_email?.toLowerCase())}
+              />
             ))}
           </div>
         </div>
@@ -68,7 +98,11 @@ export default async function CafeOnboardingPage() {
           <h3 className="text-lg font-semibold text-red-700">Отклонено</h3>
           <div className="grid gap-4">
             {rejectedRequests.map((request) => (
-              <RequestCard key={request.id} request={request} />
+              <RequestCard 
+                key={request.id} 
+                request={request}
+                invitation={invitesByEmail.get(request.applicant_email?.toLowerCase())}
+              />
             ))}
           </div>
         </div>
@@ -83,13 +117,35 @@ export default async function CafeOnboardingPage() {
   );
 }
 
-function RequestCard({ request }: { request: any }) {
+function RequestCard({ request, invitation }: { request: any; invitation?: any }) {
   const statusColor =
     request.status === "pending"
       ? "bg-yellow-100 text-yellow-700"
       : request.status === "approved"
       ? "bg-green-100 text-green-700"
       : "bg-red-100 text-red-700";
+
+  // Determine invitation status
+  let inviteStatusText = "";
+  let inviteStatusColor = "";
+  if (invitation) {
+    if (invitation.status === "accepted") {
+      inviteStatusText = "✅ Принято";
+      inviteStatusColor = "bg-green-50 text-green-700 border-green-200";
+    } else if (invitation.status === "pending") {
+      const isExpired = new Date(invitation.expires_at) < new Date();
+      if (isExpired) {
+        inviteStatusText = "⏰ Истекло";
+        inviteStatusColor = "bg-gray-50 text-gray-600 border-gray-200";
+      } else {
+        inviteStatusText = `⏳ Ожидает (до ${new Date(invitation.expires_at).toLocaleDateString()})`;
+        inviteStatusColor = "bg-blue-50 text-blue-700 border-blue-200";
+      }
+    } else if (invitation.status === "revoked") {
+      inviteStatusText = "🚫 Отозвано";
+      inviteStatusColor = "bg-red-50 text-red-600 border-red-200";
+    }
+  }
 
   return (
     <div className="rounded border border-zinc-200 bg-white p-4 shadow-sm">
@@ -121,6 +177,21 @@ function RequestCard({ request }: { request: any }) {
               <p className="mt-2 rounded bg-zinc-50 p-2 text-zinc-700">
                 <strong>Заметки администратора:</strong> {request.admin_notes}
               </p>
+            )}
+          </div>
+
+          {/* Owner Invitation Status */}
+          <div className="mt-3 pt-3 border-t border-zinc-200">
+            <p className="text-xs font-semibold text-zinc-700 mb-2">📨 Приглашение владельца:</p>
+            {invitation ? (
+              <div className={`inline-flex items-center gap-2 rounded border px-3 py-1.5 text-xs ${inviteStatusColor}`}>
+                {inviteStatusText}
+              </div>
+            ) : (
+              <InviteOwnerButton 
+                email={request.applicant_email}
+                companyName={request.cafe_name}
+              />
             )}
           </div>
         </div>

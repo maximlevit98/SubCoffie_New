@@ -80,6 +80,14 @@ export default async function LegacyAdminLayout({
                 🏪 Заявки на подключение
               </Link>
             )}
+            {role === "admin" && (
+              <Link
+                href="/admin/owner-invitations"
+                className="rounded px-3 py-2 hover:bg-zinc-100"
+              >
+                📨 Owner Invitations
+              </Link>
+            )}
             {/* Removed "Owner Panel" and "Legacy Owner" links - admins stay in admin context */}
           </nav>
         </aside>

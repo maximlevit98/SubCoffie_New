@@ -134,6 +134,115 @@ COMMENT ON TRIGGER on_role_change ON public.profiles IS
   'Audit trigger: logs all role changes for security tracking.';
 
 -- ═══════════════════════════════════════════════════════════════════════════════
+-- STEP 5: Prevent admin demotion (admin role is permanent)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION public.prevent_admin_demotion()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  -- If old role was 'admin' and new role is different, block it
+  IF OLD.role = 'admin' AND NEW.role IS DISTINCT FROM 'admin' THEN
+    RAISE EXCEPTION 'Cannot demote admin role. Admin role is permanent for security reasons.';
+  END IF;
+  
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.prevent_admin_demotion IS 
+  'Trigger function to prevent admin demotion. Admin role is permanent once assigned.';
+
+-- Attach trigger to profiles table (BEFORE UPDATE to block the change)
+DROP TRIGGER IF EXISTS prevent_admin_demotion_trigger ON public.profiles;
+CREATE TRIGGER prevent_admin_demotion_trigger
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW
+  WHEN (OLD.role = 'admin' AND NEW.role IS DISTINCT FROM 'admin')
+  EXECUTE FUNCTION public.prevent_admin_demotion();
+
+COMMENT ON TRIGGER prevent_admin_demotion_trigger ON public.profiles IS 
+  'Security trigger: prevents admin role from being demoted. Admin is permanent.';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- STEP 6: Admin-only RPC to grant admin role
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION public.admin_grant_admin_role(
+  p_target_user_id UUID
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_caller_role text;
+  v_target_email text;
+  v_target_current_role text;
+BEGIN
+  -- 🛡️ SECURITY: Only admins can grant admin role
+  SELECT role INTO v_caller_role
+  FROM public.profiles
+  WHERE id = auth.uid();
+  
+  IF v_caller_role IS DISTINCT FROM 'admin' THEN
+    RAISE EXCEPTION 'Only admin users can grant admin role';
+  END IF;
+  
+  -- 🛡️ SECURITY: Cannot grant admin to yourself (optional check)
+  IF p_target_user_id = auth.uid() THEN
+    RAISE EXCEPTION 'Cannot grant admin role to yourself';
+  END IF;
+  
+  -- Get target user info
+  SELECT email, role INTO v_target_email, v_target_current_role
+  FROM public.profiles
+  WHERE id = p_target_user_id;
+  
+  IF v_target_email IS NULL THEN
+    RAISE EXCEPTION 'Target user not found';
+  END IF;
+  
+  -- If already admin, return success
+  IF v_target_current_role = 'admin' THEN
+    RETURN jsonb_build_object(
+      'success', true,
+      'message', 'User is already admin',
+      'user_id', p_target_user_id,
+      'email', v_target_email
+    );
+  END IF;
+  
+  -- Grant admin role
+  UPDATE public.profiles
+  SET 
+    role = 'admin',
+    updated_at = NOW()
+  WHERE id = p_target_user_id;
+  
+  -- Return success
+  RETURN jsonb_build_object(
+    'success', true,
+    'message', 'Admin role granted successfully',
+    'user_id', p_target_user_id,
+    'email', v_target_email,
+    'old_role', v_target_current_role,
+    'new_role', 'admin'
+  );
+END;
+$$;
+
+COMMENT ON FUNCTION public.admin_grant_admin_role IS 
+  'Admin-only RPC to grant admin role to another user. Includes audit logging and prevents self-escalation.';
+
+-- Grant execute permission
+GRANT EXECUTE ON FUNCTION public.admin_grant_admin_role TO authenticated;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- STEP 5: Ensure SECURITY DEFINER functions can still change roles
 -- ═══════════════════════════════════════════════════════════════════════════════
 
