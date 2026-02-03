@@ -33,20 +33,20 @@ export default async function OwnerDashboardPage() {
 
     const { data: ordersToday } = await supabase
       .from('orders')
-      .select('total_amount')
+      .select('subtotal_credits, paid_credits')
       .in('cafe_id', cafeIds)
       .gte('created_at', today.toISOString());
 
     todayOrders = ordersToday?.length || 0;
     todayRevenue = ordersToday?.reduce(
-      (sum: number, order: any) => sum + (order.total_amount || 0),
+      (sum: number, order: any) => sum + (order.subtotal_credits || 0),
       0
     ) || 0;
 
     // Recent orders
     const { data: recentOrdersData } = await supabase
       .from('orders')
-      .select('*, cafes(name)')
+      .select('id, cafe_id, status, subtotal_credits, created_at, cafes(name)')
       .in('cafe_id', cafeIds)
       .order('created_at', { ascending: false })
       .limit(10);
@@ -134,7 +134,7 @@ export default async function OwnerDashboardPage() {
                     Выручка сегодня
                   </p>
                   <p className="mt-2 text-3xl font-bold text-zinc-900">
-                    {todayRevenue} ₽
+                    {todayRevenue} кр.
                   </p>
                 </div>
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100">
@@ -255,7 +255,7 @@ export default async function OwnerDashboardPage() {
                           </span>
                         </td>
                         <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-900">
-                          {order.total_amount} ₽
+                          {order.subtotal_credits} кр.
                         </td>
                         <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600">
                           {new Date(order.created_at).toLocaleDateString(
