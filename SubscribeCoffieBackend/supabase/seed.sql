@@ -7,6 +7,7 @@
 
 DO $$
 DECLARE
+  v_admin_user_id uuid;
   v_owner_user_id uuid;
   v_account_id uuid;
   v_cafe_id uuid;
@@ -15,7 +16,84 @@ BEGIN
   RAISE NOTICE '🌱 Starting seed data creation...';
 
   -- ============================================================================
-  -- 1. Создать тестового owner пользователя через auth.users
+  -- 1. Создать admin пользователя
+  -- ============================================================================
+  
+  RAISE NOTICE '👑 Creating admin user...';
+  
+  -- Проверяем, существует ли уже admin
+  SELECT id INTO v_admin_user_id 
+  FROM auth.users 
+  WHERE email = 'admin@coffie.local';
+
+  IF v_admin_user_id IS NULL THEN
+    -- Создаём admin пользователя
+    INSERT INTO auth.users (
+      instance_id,
+      id,
+      aud,
+      role,
+      email,
+      encrypted_password,
+      email_confirmed_at,
+      confirmation_sent_at,
+      created_at,
+      updated_at,
+      raw_app_meta_data,
+      raw_user_meta_data,
+      is_super_admin,
+      confirmation_token,
+      email_change,
+      email_change_token_new,
+      email_change_token_current,
+      recovery_token
+    ) VALUES (
+      '00000000-0000-0000-0000-000000000000',
+      gen_random_uuid(),
+      'authenticated',
+      'authenticated',
+      'admin@coffie.local',
+      crypt('Admin123!', gen_salt('bf')), -- password: Admin123!
+      NOW(),
+      NOW(),
+      NOW(),
+      NOW(),
+      '{"provider":"email","providers":["email"]}',
+      '{"full_name":"System Admin"}',
+      FALSE,
+      '',
+      '',
+      '',
+      '',
+      ''
+    )
+    RETURNING id INTO v_admin_user_id;
+
+    RAISE NOTICE '✅ Admin user created: %', v_admin_user_id;
+  ELSE
+    RAISE NOTICE 'ℹ️  Admin user already exists: %', v_admin_user_id;
+  END IF;
+
+  -- Создать/обновить профиль admin с ролью admin
+  INSERT INTO public.profiles (id, email, full_name, role, created_at, updated_at)
+  VALUES (
+    v_admin_user_id,
+    'admin@coffie.local',
+    'System Admin',
+    'admin',
+    NOW(),
+    NOW()
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET 
+    role = 'admin',
+    full_name = 'System Admin',
+    updated_at = NOW();
+
+  RAISE NOTICE '✅ Admin profile created with admin role';
+
+  -- ============================================================================
+  -- 2. Создать тестового owner пользователя через auth.users
   -- ============================================================================
   
   -- Проверяем, существует ли уже пользователь
@@ -481,32 +559,8 @@ BEGIN
   RAISE NOTICE '⚠️  These provide instant credits WITHOUT real money';
 END $$;
 
-
 -- ============================================================================
--- FIX ADMIN ROLE (added 2026-02-04)
+-- END OF SEED DATA
 -- ============================================================================
--- After db reset, admin@coffie.local role gets reset to 'user'
--- This ensures it's always set to 'admin' for development
+-- Admin user now created at the beginning of seed script with proper role
 -- ============================================================================
-
-DO $$
-DECLARE
-  v_admin_id uuid;
-BEGIN
-  -- Check if admin user exists
-  SELECT id INTO v_admin_id
-  FROM auth.users
-  WHERE email = 'admin@coffie.local';
-  
-  IF v_admin_id IS NOT NULL THEN
-    -- Update profile role to admin
-    UPDATE public.profiles
-    SET 
-      role = 'admin',
-      full_name = 'System Admin',
-      updated_at = NOW()
-    WHERE id = v_admin_id;
-    
-    RAISE NOTICE '✅ Admin role set for admin@cofAdmin user not found. Run scripts/create_first_admin.sql to create one.';
-  END IF;
-END $$;
