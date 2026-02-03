@@ -583,16 +583,16 @@ BEGIN
   
   -- 🔒 AUDIT: Log order creation
   INSERT INTO public.audit_logs (
-    user_id, 
+    actor_user_id, 
     action, 
-    resource_type, 
-    resource_id, 
-    metadata, 
+    table_name, 
+    record_id, 
+    payload, 
     created_at
   ) VALUES (
     v_user_id,
     'order.create',
-    'order',
+    'orders_core',
     v_order_id,
     jsonb_build_object(
       'cafe_id', p_cafe_id,
@@ -659,9 +659,9 @@ BEGIN
       created_at timestamptz NOT NULL DEFAULT now()
     );
     
-    CREATE INDEX audit_logs_user_id_idx ON public.audit_logs(user_id);
-    CREATE INDEX audit_logs_action_idx ON public.audit_logs(action);
-    CREATE INDEX audit_logs_created_at_idx ON public.audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS audit_logs_actor_user_id_idx ON public.audit_logs(actor_user_id);
+    CREATE INDEX IF NOT EXISTS audit_logs_action_idx ON public.audit_logs(action);
+    CREATE INDEX IF NOT EXISTS audit_logs_created_at_idx ON public.audit_logs(created_at DESC);
     
     ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
     
