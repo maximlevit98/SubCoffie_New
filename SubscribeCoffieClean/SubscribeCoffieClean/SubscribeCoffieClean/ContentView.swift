@@ -19,20 +19,15 @@ struct ContentView: View {
         case orderStatus
     }
 
-    // MARK: - Persisted auth/profile (AppStorage)
-    @AppStorage("sc_isLoggedIn") private var isLoggedIn: Bool = false
-    @AppStorage("sc_knownPhones") private var knownPhonesCSV: String = ""
-    @AppStorage("sc_phone") private var savedPhone: String = ""
-    @AppStorage("sc_fullName") private var savedFullName: String = ""
-    @AppStorage("sc_birthTS") private var savedBirthTS: Double = Date().timeIntervalSince1970
-    @AppStorage("sc_city") private var savedCity: String = "Москва"
+    // MARK: - Auth Service
+    @StateObject private var authService = AuthService.shared
+    
+    // MARK: - Wallet type persistence (kept for wallet selection)
     @AppStorage("sc_defaultWalletKind") private var defaultWalletKind: String = ""
     @AppStorage("sc_lastCafeId") private var lastCafeId: String = ""
     @AppStorage("sc_lastCafeName") private var lastCafeName: String = ""
     @AppStorage("sc_cafeWalletCafeId") private var cafeWalletCafeId: String = ""
     @AppStorage("sc_cafeWalletCafeName") private var cafeWalletCafeName: String = ""
-    
-    // MARK: - Wallet type persistence
     @AppStorage("sc_walletType") private var walletType: String = ""
     @AppStorage("sc_walletScopeId") private var walletScopeId: String = ""
     @AppStorage("sc_walletScopeTitle") private var walletScopeTitle: String = ""
@@ -40,7 +35,6 @@ struct ContentView: View {
     // MARK: - UI State
     @State private var isLoading: Bool = true
     @State private var currentScreen: AppScreen = .login
-    @State private var pendingPhoneForProfile: String = ""
 
     // выбранная кофейня/меню
     @State private var selectedCafe: CafeSummary? = nil
@@ -132,8 +126,8 @@ struct ContentView: View {
             break
 
         case .profileSetup:
-            currentScreen = .login
-            pendingPhoneForProfile = ""
+            // Handled by AuthContainerView now
+            break
 
         case .walletChoice:
             break
@@ -173,7 +167,11 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .top) {
             VStack {
-            if isLoading {
+            // Show auth screen if not authenticated
+            if !authService.isAuthenticated {
+                AuthContainerView()
+                    .environmentObject(authService)
+            } else if isLoading {
                 ProgressView().scaleEffect(1.4)
                 Text("Загружаем приложение…")
                     .padding(.top, 12)
@@ -181,14 +179,12 @@ struct ContentView: View {
                 switch currentScreen {
 
                 case .login:
-                    LoginView {
-                        handleLoginVerified("")
-                    }
+                    // Handled by AuthContainerView
+                    EmptyView()
 
                 case .profileSetup:
-                    ProfileSetupView(phone: pendingPhoneForProfile) { fullName, birthDate, city in
-                        completeProfile(fullName: fullName, birthDate: birthDate, city: city)
-                    }
+                    // Handled by AuthContainerView
+                    EmptyView()
 
                 case .walletChoice:
                     WalletChoiceView(
@@ -356,11 +352,11 @@ struct ContentView: View {
                     title: topBarTitle,
                     canGoBack: canGoBack,
                     onBack: { handleBack() },
-                    showsLogout: isLoggedIn,
+                    showsLogout: authService.isAuthenticated,
                     onLogout: { logout() },
-                    showsProfile: isLoggedIn,
+                    showsProfile: authService.isAuthenticated,
                     onProfile: { isProfilePresented = true },
-                    showsWalletButton: isLoggedIn && currentScreen != .login,
+                    showsWalletButton: authService.isAuthenticated && currentScreen != .login,
                     onWallet: { isWalletDemoPresented = true }
                 )
                 .zIndex(1)
@@ -420,10 +416,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isProfilePresented) {
             ProfileView(
-                fullName: savedFullName,
-                phone: savedPhone,
-                birthDate: Date(timeIntervalSince1970: savedBirthTS),
-                city: savedCity,
+                fullName: authService.userProfile?.fullName ?? "",
+                phone: authService.userProfile?.phone ?? "",
+                birthDate: authService.userProfile?.birthDate.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date(),
+                city: authService.userProfile?.city ?? "",
                 cityPassWallet: wallet,
                 cafeWallet: cafeWallet,
                 availableCafes: availableCafes,
@@ -463,39 +459,16 @@ struct ContentView: View {
             }
         }
 #endif
-    }
-
-    // MARK: - Auth logic (mock)
-    private func handleLoginVerified(_ phoneDigits: String) {
-        let normalized = phoneDigits.filter { $0.isNumber }
-
-        let known = knownPhonesSet()
-        if known.contains(normalized) {
-            savedPhone = normalized
-            isLoggedIn = true
-            routeAfterAuth()
-        } else {
-            pendingPhoneForProfile = normalized
-            currentScreen = .profileSetup
+        .onChange(of: authService.isAuthenticated) { _, isAuth in
+            if isAuth {
+                routeAfterAuth()
+            }
         }
+        .environmentObject(authService)
     }
 
-    private func completeProfile(fullName: String, birthDate: Date, city: String) {
-        savedFullName = fullName
-        savedBirthTS = birthDate.timeIntervalSince1970
-        savedCity = city
-        savedPhone = pendingPhoneForProfile
-
-        var known = knownPhonesSet()
-        known.insert(pendingPhoneForProfile)
-        knownPhonesCSV = known.sorted().joined(separator: ",")
-
-        pendingPhoneForProfile = ""
-        isLoggedIn = true
-        
-        // Проверяем, выбран ли тип кошелька
-        routeAfterAuth()
-    }
+    // MARK: - Auth logic (real Supabase Auth)
+    // routeAfterAuth is defined later as an async function
     
     // MARK: - Wallet setup logic
     private func proceedAfterWalletSetup() {
@@ -549,7 +522,7 @@ struct ContentView: View {
     }
 
     private func determineStartScreen() async -> AppScreen {
-        if !isLoggedIn { return .login }
+        if !authService.isAuthenticated { return .login }
 
         // если default wallet kind не задан — старое поведение
         if defaultWalletKind.isEmpty {
@@ -658,7 +631,9 @@ struct ContentView: View {
     }
 
     private func logout() {
-        isLoggedIn = false
+        Task {
+            try? await authService.signOut()
+        }
         cart.reset()
         orderStore.reset()
         selectedCafe = nil
@@ -693,14 +668,6 @@ struct ContentView: View {
     private func supportsCityPass(for cafe: CafeSummary) -> Bool {
         let prefix = cafe.id.uuidString.prefix(1)
         return prefix == "1" || prefix == "2" || prefix == "3"
-    }
-
-    private func knownPhonesSet() -> Set<String> {
-        let items = knownPhonesCSV
-            .split(separator: ",")
-            .map { String($0) }
-            .filter { !$0.isEmpty }
-        return Set(items)
     }
 }
 

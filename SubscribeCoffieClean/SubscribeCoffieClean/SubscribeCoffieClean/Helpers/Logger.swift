@@ -6,6 +6,12 @@ enum AppLogger {
         print("[Supabase] \(message)")
         #endif
     }
+    
+    static func error(_ message: String) {
+        #if DEBUG
+        print("[Supabase ERROR] \(message)")
+        #endif
+    }
 
     static func debugResponse(url: URL, statusCode: Int?, body: String?) {
         #if DEBUG

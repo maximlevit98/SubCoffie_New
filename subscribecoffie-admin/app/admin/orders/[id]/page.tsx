@@ -43,6 +43,7 @@ export default async function OrderDetailsPage({
   const order = orderData.order;
   const items = orderData.items || [];
   const events = orderData.events || [];
+  const userProfile = order.user_profile;
 
   // Определяем доступные переходы статуса
   const statusFlow: Record<string, string[]> = {
@@ -98,6 +99,56 @@ export default async function OrderDetailsPage({
 
       {/* Order Info */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Customer Information */}
+        {userProfile && (
+          <div className="rounded-lg border border-zinc-200 bg-white p-6">
+            <h3 className="text-lg font-semibold mb-4">Информация о клиенте</h3>
+            <div className="flex items-start gap-4 mb-4">
+              {userProfile.avatar_url ? (
+                <img
+                  src={userProfile.avatar_url}
+                  alt={userProfile.full_name || "User"}
+                  className="w-16 h-16 rounded-full"
+                />
+              ) : (
+                <div className="w-16 h-16 rounded-full bg-zinc-200 flex items-center justify-center">
+                  <span className="text-xl font-semibold">
+                    {(userProfile.full_name || "?").charAt(0).toUpperCase()}
+                  </span>
+                </div>
+              )}
+              <div className="flex-1">
+                <h4 className="font-semibold text-lg">{userProfile.full_name || "Unknown"}</h4>
+                <div className="space-y-1 mt-2 text-sm">
+                  {userProfile.email && (
+                    <p className="text-zinc-600">📧 {userProfile.email}</p>
+                  )}
+                  {userProfile.phone && (
+                    <p className="text-zinc-600 font-mono">📱 {userProfile.phone}</p>
+                  )}
+                  {userProfile.auth_provider && (
+                    <p className="text-zinc-500">
+                      Регистрация: {userProfile.auth_provider === "google" && "🔵 Google"}
+                      {userProfile.auth_provider === "apple" && "🍎 Apple"}
+                      {userProfile.auth_provider === "email" && "📧 Email"}
+                      {userProfile.auth_provider === "phone" && "📱 Phone"}
+                    </p>
+                  )}
+                  <p className="text-zinc-400 text-xs">
+                    Зарегистрирован: {new Date(userProfile.created_at).toLocaleDateString("ru-RU")}
+                  </p>
+                </div>
+                <Link
+                  href={`/admin/users/${userProfile.id}`}
+                  className="inline-flex items-center mt-3 text-sm text-blue-600 hover:text-blue-700"
+                >
+                  Профиль пользователя →
+                </Link>
+              </div>
+            </div>
+          </div>
+        )}
+        
         <div className="rounded-lg border border-zinc-200 bg-white p-6">
           <h3 className="text-lg font-semibold mb-4">Информация о заказе</h3>
           <dl className="space-y-2 text-sm">

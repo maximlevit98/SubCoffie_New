@@ -68,24 +68,7 @@ struct DeliveryFeeInfo: Codable {
 }
 
 // MARK: - Service Stubs (for Views that reference them)
-@MainActor
-class AuthService: ObservableObject {
-    @Published var isAuthenticated = false
-    @Published var currentUser: User?
-    
-    static let shared = AuthService()
-    
-    func signOut() async throws {
-        isAuthenticated = false
-        currentUser = nil
-    }
-    
-    func getLoginHistory() async throws -> [LoginHistoryItemStub] {
-        return []
-    }
-    
-    func clearLoginHistory() async throws {}
-}
+// AuthService moved to separate file (Helpers/AuthService.swift)
 
 // OrderService moved to separate file (Helpers/OrderService.swift)
 

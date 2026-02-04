@@ -12,6 +12,16 @@ struct SubscribeCoffieCleanApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onOpenURL { url in
+                    // Handle OAuth callbacks for Google and Apple sign in
+                    Task {
+                        do {
+                            try await AuthService.shared.handleOAuthCallback(url: url)
+                        } catch {
+                            print("❌ Failed to handle OAuth callback: \(error)")
+                        }
+                    }
+                }
         }
     }
 }

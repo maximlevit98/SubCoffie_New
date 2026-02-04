@@ -14,6 +14,8 @@ struct CheckoutView: View {
     let selectedCafe: CafeSummary?
     let onOrderSuccess: (UUID) -> Void
     
+    @EnvironmentObject var authService: AuthService
+    
     @State private var isProcessing = false
     @State private var errorMessage: String?
     @State private var showError = false
@@ -134,12 +136,15 @@ struct CheckoutView: View {
                 print("🛒 [CheckoutView] Total: \(cart.subtotalCredits) credits")
                 #endif
                 
-                // Create order using OrderService
+                // Create order using OrderService with real user data
+                let customerName = authService.userProfile?.fullName ?? "Unknown User"
+                let customerPhone = authService.userProfile?.phone ?? ""
+                
                 let result = try await OrderService.shared.createOrder(
                     cafeId: cafe.id,
                     orderType: "now",
-                    customerName: "Guest",
-                    customerPhone: "+79991234567",
+                    customerName: customerName,
+                    customerPhone: customerPhone,
                     customerNotes: nil,
                     paymentMethod: "wallet",
                     items: items
