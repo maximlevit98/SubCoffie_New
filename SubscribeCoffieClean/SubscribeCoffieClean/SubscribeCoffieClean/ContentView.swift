@@ -134,7 +134,12 @@ struct ContentView: View {
             break
 
         case .walletTopUp:
-            currentScreen = .walletChoice
+            // Return to wallet choice if came from there, otherwise to map
+            if realWalletStore.hasWallets {
+                currentScreen = .map
+            } else {
+                currentScreen = .walletChoice
+            }
 
         case .onboarding:
             break
@@ -195,18 +200,23 @@ struct ContentView: View {
                                     // Check if CityPass already exists
                                     if let existingCityPass = realWalletStore.cityPassWallet {
                                         realWalletStore.selectWallet(existingCityPass)
-                                        walletTopUpType = .citypass
-                                        walletTopUpScopeTitle = "CityPass"
-                                        isWalletTopUpPresented = true
+                                        AppLogger.debug("✅ Selected existing CityPass wallet")
+                                        await MainActor.run {
+                                            currentScreen = .walletTopUp
+                                        }
                                     } else {
                                         // Create new CityPass wallet
+                                        await MainActor.run { isLoading = true }
                                         let newWallet = try await realWalletStore.createCityPassWallet()
-                                        walletTopUpType = .citypass
-                                        walletTopUpScopeTitle = "CityPass"
-                                        isWalletTopUpPresented = true
+                                        AppLogger.debug("✅ Created new CityPass wallet")
+                                        await MainActor.run {
+                                            isLoading = false
+                                            currentScreen = .walletTopUp
+                                        }
                                     }
                                 } catch {
                                     AppLogger.debug("❌ Failed to create/select CityPass: \(error)")
+                                    await MainActor.run { isLoading = false }
                                 }
                             }
                         },
@@ -227,6 +237,10 @@ struct ContentView: View {
                         WalletTopUpView(wallet: wallet, onTopUpSuccess: {
                             Task {
                                 await realWalletStore.refreshWallets()
+                                // Navigate to map after first top-up
+                                await MainActor.run {
+                                    currentScreen = .map
+                                }
                             }
                         })
                     } else {
@@ -634,33 +648,29 @@ struct ContentView: View {
 
     private func handleCafeWalletSelection(_ cafe: CafeSummary) async {
         await MainActor.run { isMenuLoading = true }
-        let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
         
         // Create or select Cafe Wallet for this cafe
         do {
             if let existingWallet = realWalletStore.cafeWallet(forCafe: cafe.id) {
+                // Wallet already exists, select it
                 realWalletStore.selectWallet(existingWallet)
+                AppLogger.debug("✅ Selected existing Cafe Wallet for cafe: \(cafe.name)")
             } else {
                 // Create new Cafe Wallet for this cafe
                 let newWallet = try await realWalletStore.createCafeWallet(cafeId: cafe.id, networkId: nil)
                 AppLogger.debug("✅ Created Cafe Wallet for cafe: \(cafe.name)")
             }
             
-            // Update legacy AppStorage (for backward compat)
+            // Navigate to top-up screen
             await MainActor.run {
-                cafeWalletCafeId = cafe.id.uuidString
-                cafeWalletCafeName = cafe.name
-                cafeWallet.selectCafe(cafe) // Legacy
-                
-                menuSchemaUnavailable = result.schemaMissing
-                applyCafeSelection(cafe: cafe, menu: result.menu, persistLastCafe: true)
                 isMenuLoading = false
-                currentScreen = .cafe
+                currentScreen = .walletTopUp
             }
         } catch {
             await MainActor.run {
                 AppLogger.debug("❌ Failed to create Cafe Wallet: \(error)")
                 isMenuLoading = false
+                // Stay on cafe selection screen on error
             }
         }
     }

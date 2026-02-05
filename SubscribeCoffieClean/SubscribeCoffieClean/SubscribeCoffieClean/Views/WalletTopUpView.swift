@@ -425,16 +425,26 @@ struct WalletTopUpView: View {
                 paymentMethodId: nil
             )
             
-            topupResult = result
-            showSuccessAlert = true
-            isProcessing = false
+            await MainActor.run {
+                topupResult = result
+                showSuccessAlert = true
+                isProcessing = false
+            }
             
             // Call callback to refresh wallets
             onTopUpSuccess?()
             
+            // Auto-dismiss after short delay
+            try? await Task.sleep(for: .seconds(1.5))
+            await MainActor.run {
+                dismiss()
+            }
+            
         } catch {
-            errorMessage = "Ошибка: \(error.localizedDescription)"
-            isProcessing = false
+            await MainActor.run {
+                errorMessage = "Ошибка: \(error.localizedDescription)"
+                isProcessing = false
+            }
         }
     }
     
