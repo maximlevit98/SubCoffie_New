@@ -34,8 +34,12 @@ final class RealWalletStore: ObservableObject {
     
     // MARK: - Persistence (AppStorage keys for selected wallet)
     
-    @AppStorage("sc_selected_wallet_id") private var selectedWalletId: String = ""
-    @AppStorage("sc_selected_wallet_type") private var selectedWalletType: String = ""
+    @AppStorage("sc_selectedWalletId") private var selectedWalletId: String = ""
+    @AppStorage("sc_selectedWalletType") private var selectedWalletType: String = ""
+    
+    // Legacy keys (migration)
+    @AppStorage("sc_selected_wallet_id") private var legacySelectedWalletId: String = ""
+    @AppStorage("sc_selected_wallet_type") private var legacySelectedWalletType: String = ""
     
     // MARK: - Initialization
     
@@ -155,6 +159,8 @@ final class RealWalletStore: ObservableObject {
         selectedWallet = nil
         selectedWalletId = ""
         selectedWalletType = ""
+        legacySelectedWalletId = ""
+        legacySelectedWalletType = ""
         
         AppLogger.debug("🗑️ Cleared wallet selection")
     }
@@ -192,6 +198,14 @@ final class RealWalletStore: ObservableObject {
     
     /// Restore selected wallet from AppStorage
     private func restoreSelectedWallet() {
+        // Migrate legacy keys if present
+        if selectedWalletId.isEmpty, !legacySelectedWalletId.isEmpty {
+            selectedWalletId = legacySelectedWalletId
+            selectedWalletType = legacySelectedWalletType
+            legacySelectedWalletId = ""
+            legacySelectedWalletType = ""
+        }
+        
         guard !selectedWalletId.isEmpty,
               let walletId = UUID(uuidString: selectedWalletId) else {
             // No saved selection, try to auto-select CityPass
