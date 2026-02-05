@@ -1,0 +1,361 @@
+-- Migration: Simple Cashback System (Lightweight Alternative to Full Loyalty)
+-- Description: Adds cashback points that accumulate as bonus_balance in wallets
+-- Date: 2026-02-10
+-- Use Case: Simpler alternative if full loyalty program is too complex
+
+-- ============================================================================
+-- 1. Add bonus_balance to wallets (if not exists)
+-- ============================================================================
+
+alter table public.wallets
+  add column if not exists bonus_balance_credits int not null default 0 check (bonus_balance_credits >= 0);
+
+comment on column public.wallets.bonus_balance_credits is 'Bonus credits earned from cashback (can be used for orders)';
+
+-- ============================================================================
+-- 2. Create cashback_config table
+-- ============================================================================
+
+create table if not exists public.cashback_config (
+  id uuid primary key default gen_random_uuid(),
+  wallet_type wallet_type not null unique,
+  cashback_percent decimal(5,2) not null default 5.00 check (cashback_percent >= 0 and cashback_percent <= 100),
+  min_order_amount int not null default 0,
+  max_cashback_per_order int, -- Optional cap per order
+  is_active boolean not null default true,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+comment on table public.cashback_config is 'Cashback configuration per wallet type';
+comment on column public.cashback_config.cashback_percent is 'Percentage of order amount returned as bonus (e.g., 5.00 = 5%)';
+comment on column public.cashback_config.min_order_amount is 'Minimum order amount to earn cashback';
+comment on column public.cashback_config.max_cashback_per_order is 'Optional maximum cashback per single order';
+
+-- Enable RLS
+alter table public.cashback_config enable row level security;
+
+-- Policies
+create policy "Public can view cashback config"
+  on public.cashback_config for select
+  using (true);
+
+create policy "Admin can manage cashback config"
+  on public.cashback_config for all
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+-- Insert default config
+insert into public.cashback_config (wallet_type, cashback_percent, min_order_amount, is_active)
+values
+  ('citypass', 5.00, 100, true),
+  ('cafe_wallet', 3.00, 0, true)
+on conflict (wallet_type) do nothing;
+
+-- ============================================================================
+-- 3. Create cashback_history table (audit trail)
+-- ============================================================================
+
+create table if not exists public.cashback_history (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  wallet_id uuid not null references public.wallets(id) on delete cascade,
+  order_id uuid references public.orders_core(id) on delete set null,
+  order_amount int not null,
+  cashback_percent decimal(5,2) not null,
+  cashback_amount int not null,
+  created_at timestamp with time zone default now()
+);
+
+comment on table public.cashback_history is 'History of cashback earned by users';
+
+-- Enable RLS
+alter table public.cashback_history enable row level security;
+
+-- Policies
+create policy "Users can view own cashback history"
+  on public.cashback_history for select
+  using (auth.uid() = user_id);
+
+create policy "Admin can view all cashback history"
+  on public.cashback_history for select
+  using (
+    exists (
+      select 1 from public.profiles
+      where id = auth.uid() and role = 'admin'
+    )
+  );
+
+create policy "System can insert cashback history"
+  on public.cashback_history for insert
+  with check (true);
+
+-- Indexes
+create index if not exists cashback_history_user_id_idx on public.cashback_history(user_id);
+create index if not exists cashback_history_wallet_id_idx on public.cashback_history(wallet_id);
+create index if not exists cashback_history_created_at_idx on public.cashback_history(created_at desc);
+
+-- ============================================================================
+-- 4. RPC: Calculate cashback for order
+-- ============================================================================
+
+create or replace function public.calculate_cashback(
+  p_order_amount int,
+  p_wallet_type wallet_type
+)
+returns int
+language plpgsql
+stable
+as $$
+declare
+  v_config record;
+  v_cashback int;
+begin
+  -- Get cashback config for wallet type
+  select *
+  into v_config
+  from public.cashback_config
+  where wallet_type = p_wallet_type and is_active = true;
+  
+  if not found or p_order_amount < v_config.min_order_amount then
+    return 0;
+  end if;
+  
+  -- Calculate cashback: order_amount × (percent / 100)
+  v_cashback := floor(p_order_amount * v_config.cashback_percent / 100);
+  
+  -- Apply max cap if set
+  if v_config.max_cashback_per_order is not null then
+    v_cashback := least(v_cashback, v_config.max_cashback_per_order);
+  end if;
+  
+  return v_cashback;
+end;
+$$;
+
+comment on function public.calculate_cashback is 'Calculate cashback amount for order based on wallet type';
+
+grant execute on function public.calculate_cashback(int, wallet_type) to authenticated;
+
+-- ============================================================================
+-- 5. RPC: Award cashback (internal)
+-- ============================================================================
+
+create or replace function public.award_cashback(
+  p_user_id uuid,
+  p_wallet_id uuid,
+  p_order_id uuid,
+  p_order_amount int,
+  p_wallet_type wallet_type
+)
+returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_cashback_amount int;
+  v_cashback_percent decimal;
+  v_new_bonus_balance int;
+begin
+  -- Calculate cashback
+  v_cashback_amount := public.calculate_cashback(p_order_amount, p_wallet_type);
+  
+  if v_cashback_amount = 0 then
+    return jsonb_build_object(
+      'success', true,
+      'cashback_awarded', 0,
+      'message', 'Order does not qualify for cashback'
+    );
+  end if;
+  
+  -- Get cashback percent for history
+  select cashback_percent into v_cashback_percent
+  from public.cashback_config
+  where wallet_type = p_wallet_type and is_active = true;
+  
+  -- Add cashback to wallet bonus_balance
+  update public.wallets
+  set
+    bonus_balance_credits = bonus_balance_credits + v_cashback_amount,
+    updated_at = now()
+  where id = p_wallet_id
+  returning bonus_balance_credits into v_new_bonus_balance;
+  
+  -- Record in history
+  insert into public.cashback_history (user_id, wallet_id, order_id, order_amount, cashback_percent, cashback_amount)
+  values (p_user_id, p_wallet_id, p_order_id, p_order_amount, v_cashback_percent, v_cashback_amount);
+  
+  return jsonb_build_object(
+    'success', true,
+    'cashback_awarded', v_cashback_amount,
+    'cashback_percent', v_cashback_percent,
+    'new_bonus_balance', v_new_bonus_balance
+  );
+end;
+$$;
+
+comment on function public.award_cashback is 'Award cashback to wallet bonus_balance for completed order';
+
+-- ============================================================================
+-- 6. Trigger: Award cashback on order issued
+-- ============================================================================
+
+create or replace function trigger_order_issued_cashback()
+returns trigger
+language plpgsql
+security definer
+as $$
+declare
+  v_wallet_type wallet_type;
+  v_wallet_id uuid;
+begin
+  -- Only process when order becomes 'issued'
+  if NEW.status = 'issued' and (OLD is null or OLD.status != 'issued') then
+    
+    -- Get wallet info from order
+    select w.wallet_type, w.id
+    into v_wallet_type, v_wallet_id
+    from public.wallets w
+    where w.user_id = NEW.user_id
+      and (w.wallet_type = 'citypass' or w.cafe_id = NEW.cafe_id)
+    limit 1;
+    
+    if v_wallet_id is not null then
+      -- Award cashback
+      perform public.award_cashback(
+        NEW.user_id,
+        v_wallet_id,
+        NEW.id,
+        NEW.paid_credits,
+        v_wallet_type
+      );
+    end if;
+  end if;
+  
+  return NEW;
+end;
+$$;
+
+-- Create trigger on orders_core
+drop trigger if exists trigger_order_issued_cashback on public.orders_core;
+create trigger trigger_order_issued_cashback
+  after insert or update on public.orders_core
+  for each row
+  execute function trigger_order_issued_cashback();
+
+comment on function trigger_order_issued_cashback is 'Awards cashback to bonus_balance when order is issued';
+
+-- ============================================================================
+-- 7. RPC: Get user cashback stats
+-- ============================================================================
+
+create or replace function public.get_user_cashback_stats(p_user_id uuid)
+returns jsonb
+language plpgsql
+security definer
+as $$
+declare
+  v_stats jsonb;
+begin
+  -- Check authorization
+  if auth.uid() != p_user_id and not exists (
+    select 1 from public.profiles where id = auth.uid() and role = 'admin'
+  ) then
+    raise exception 'Unauthorized';
+  end if;
+  
+  select jsonb_build_object(
+    'total_cashback_earned', coalesce(sum(cashback_amount), 0),
+    'total_orders_with_cashback', count(*),
+    'current_bonus_balance', (
+      select sum(bonus_balance_credits)
+      from public.wallets
+      where user_id = p_user_id
+    ),
+    'recent_cashback', (
+      select jsonb_agg(
+        jsonb_build_object(
+          'order_id', order_id,
+          'cashback_amount', cashback_amount,
+          'cashback_percent', cashback_percent,
+          'created_at', created_at
+        )
+        order by created_at desc
+      )
+      from (
+        select * from public.cashback_history
+        where user_id = p_user_id
+        order by created_at desc
+        limit 10
+      ) recent
+    )
+  )
+  into v_stats
+  from public.cashback_history
+  where user_id = p_user_id;
+  
+  return v_stats;
+end;
+$$;
+
+comment on function public.get_user_cashback_stats is 'Get user cashback statistics and recent history';
+
+grant execute on function public.get_user_cashback_stats(uuid) to authenticated;
+
+-- ============================================================================
+-- 8. RPC: Get cashback config (public)
+-- ============================================================================
+
+create or replace function public.get_cashback_config()
+returns table(
+  wallet_type wallet_type,
+  cashback_percent decimal(5,2),
+  min_order_amount int,
+  max_cashback_per_order int
+)
+language plpgsql
+stable
+as $$
+begin
+  return query
+  select
+    cc.wallet_type,
+    cc.cashback_percent,
+    cc.min_order_amount,
+    cc.max_cashback_per_order
+  from public.cashback_config cc
+  where cc.is_active = true
+  order by cc.wallet_type;
+end;
+$$;
+
+comment on function public.get_cashback_config is 'Get active cashback configuration for all wallet types';
+
+grant execute on function public.get_cashback_config() to anon, authenticated;
+
+-- ============================================================================
+-- Documentation
+-- ============================================================================
+
+comment on schema public is 'Simple cashback system:
+- Cashback earned as bonus_balance_credits in wallets
+- Configurable percent per wallet type (default: CityPass 5%, Cafe 3%)
+- Automatically awarded on order completion
+- Bonus balance can be used for future orders
+- Full audit trail in cashback_history
+
+Usage:
+1. Cashback is automatic (trigger on order issued)
+2. Users see bonus_balance in wallet
+3. Admin can adjust rates in cashback_config
+4. View stats: SELECT get_user_cashback_stats(user_id)
+
+Formula:
+  cashback = floor(order_amount × cashback_percent / 100)
+  
+Example:
+  Order 1000₽ with 5% cashback → 50₽ bonus credits';
