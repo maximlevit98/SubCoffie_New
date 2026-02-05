@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { getUserWallet, getUserTransactions } from "../actions";
+import { getUserWallets, getUserTransactions } from "../actions";
 import { AddTransactionForm } from "./AddTransactionForm";
 
 type WalletDetailsPageProps = {
@@ -12,24 +12,31 @@ type WalletDetailsPageProps = {
 export default async function WalletDetailsPage({
   params,
 }: WalletDetailsPageProps) {
-  let wallet: any = null;
+  let wallets: any[] = [];
   let transactions: any[] = [];
   let error: string | null = null;
 
   try {
-    [wallet, transactions] = await Promise.all([
-      getUserWallet(params.userId),
-      getUserTransactions(params.userId, 100),
-    ]);
+    wallets = await getUserWallets(params.userId);
+    
+    // Get transactions for all wallets
+    if (wallets.length > 0) {
+      const allTransactions = await Promise.all(
+        wallets.map((w: any) => getUserTransactions(w.id, 50))
+      );
+      transactions = allTransactions.flat().sort((a, b) => 
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+    }
   } catch (e: any) {
     error = e.message;
   }
 
-  if (error || !wallet) {
+  if (error) {
     return (
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-semibold">Кошелёк</h2>
+          <h2 className="text-2xl font-semibold">Кошельки пользователя</h2>
           <Link
             href="/admin/wallets"
             className="text-sm text-zinc-600 hover:text-zinc-900"
@@ -38,7 +45,26 @@ export default async function WalletDetailsPage({
           </Link>
         </div>
         <p className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          Не удалось загрузить кошелёк: {error ?? "Not found"}
+          Не удалось загрузить кошельки: {error}
+        </p>
+      </section>
+    );
+  }
+
+  if (wallets.length === 0) {
+    return (
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-2xl font-semibold">Кошельки пользователя</h2>
+          <Link
+            href="/admin/wallets"
+            className="text-sm text-zinc-600 hover:text-zinc-900"
+          >
+            ← Назад к кошелькам
+          </Link>
+        </div>
+        <p className="rounded border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-500">
+          У пользователя нет кошельков
         </p>
       </section>
     );
@@ -49,9 +75,9 @@ export default async function WalletDetailsPage({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-semibold">Управление кошельком</h2>
+          <h2 className="text-2xl font-semibold">Кошельки пользователя</h2>
           <p className="text-sm text-zinc-500 mt-1">
-            User ID: {params.userId.slice(0, 8)}...
+            User ID: {params.userId.slice(0, 8)}... | Кошельков: {wallets.length}
           </p>
         </div>
         <Link
@@ -62,37 +88,29 @@ export default async function WalletDetailsPage({
         </Link>
       </div>
 
-      {/* Wallet Info */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="rounded-lg border border-zinc-200 bg-white p-6">
-          <p className="text-sm text-zinc-500">Текущий баланс</p>
-          <p className="text-3xl font-bold mt-2">{wallet.balance || 0} кр.</p>
-        </div>
-        <div className="rounded-lg border border-zinc-200 bg-white p-6">
-          <p className="text-sm text-zinc-500">Бонусный баланс</p>
-          <p className="text-3xl font-bold mt-2 text-emerald-600">
-            {wallet.bonus_balance || 0} кр.
-          </p>
-        </div>
-        <div className="rounded-lg border border-zinc-200 bg-white p-6">
-          <p className="text-sm text-zinc-500">Всего пополнено</p>
-          <p className="text-3xl font-bold mt-2 text-zinc-500">
-            {wallet.lifetime_topup || 0} кр.
-          </p>
-        </div>
+      {/* Wallets Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {wallets.map((wallet: any) => (
+          <WalletCard key={wallet.id} wallet={wallet} />
+        ))}
       </div>
 
       {/* Add Transaction Form */}
       <div className="rounded-lg border border-zinc-200 bg-white p-6">
-        <h3 className="text-lg font-semibold mb-4">
+        <h3 className="text-lg font-semibold mb-2">
           Начислить или списать средства
         </h3>
-        <AddTransactionForm userId={params.userId} />
+        <p className="text-sm text-zinc-500 mb-4">
+          ⚠️ Функция временно недоступна (RPC deprecated). Требуется новая реализация.
+        </p>
+        {/* <AddTransactionForm userId={params.userId} /> */}
       </div>
 
       {/* Transactions History */}
       <div className="rounded-lg border border-zinc-200 bg-white p-6">
-        <h3 className="text-lg font-semibold mb-4">История транзакций</h3>
+        <h3 className="text-lg font-semibold mb-4">
+          История транзакций (все кошельки)
+        </h3>
 
         {!transactions || transactions.length === 0 ? (
           <p className="text-sm text-zinc-500">Транзакции не найдены</p>
@@ -102,6 +120,7 @@ export default async function WalletDetailsPage({
               <thead className="border-b border-zinc-200 text-zinc-600">
                 <tr>
                   <th className="py-3 px-4 text-left font-medium">Дата</th>
+                  <th className="py-3 px-4 text-left font-medium">Кошелёк</th>
                   <th className="py-3 px-4 text-left font-medium">Тип</th>
                   <th className="py-3 px-4 text-left font-medium">Описание</th>
                   <th className="py-3 px-4 text-right font-medium">
@@ -114,34 +133,114 @@ export default async function WalletDetailsPage({
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
-                {transactions.map((tx: any) => (
-                  <tr key={tx.id} className="text-zinc-700">
-                    <td className="py-3 px-4 text-xs">
-                      {new Date(tx.created_at).toLocaleString("ru-RU")}
-                    </td>
-                    <td className="py-3 px-4">
-                      <TransactionTypeBadge type={tx.type} />
-                    </td>
-                    <td className="py-3 px-4 text-zinc-600">
-                      {tx.description || "—"}
-                    </td>
-                    <td className="py-3 px-4 text-right text-zinc-500">
-                      {tx.balance_before} кр.
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <TransactionAmount type={tx.type} amount={tx.amount} />
-                    </td>
-                    <td className="py-3 px-4 text-right font-medium">
-                      {tx.balance_after} кр.
-                    </td>
-                  </tr>
-                ))}
+                {transactions.map((tx: any) => {
+                  const wallet = wallets.find((w: any) => w.id === tx.wallet_id);
+                  return (
+                    <tr key={tx.id} className="text-zinc-700">
+                      <td className="py-3 px-4 text-xs">
+                        {new Date(tx.created_at).toLocaleString("ru-RU")}
+                      </td>
+                      <td className="py-3 px-4 text-xs">
+                        <WalletTypeBadge wallet={wallet} />
+                      </td>
+                      <td className="py-3 px-4">
+                        <TransactionTypeBadge type={tx.type} />
+                      </td>
+                      <td className="py-3 px-4 text-zinc-600">
+                        {tx.description || "—"}
+                      </td>
+                      <td className="py-3 px-4 text-right text-zinc-500">
+                        {tx.balance_before} кр.
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <TransactionAmount type={tx.type} amount={tx.amount} />
+                      </td>
+                      <td className="py-3 px-4 text-right font-medium">
+                        {tx.balance_after} кр.
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+// Wallet Card Component
+function WalletCard({ wallet }: { wallet: any }) {
+  const isCityPass = wallet.wallet_type === "citypass";
+  
+  return (
+    <div className={`rounded-lg border-2 p-6 ${
+      isCityPass 
+        ? "border-blue-200 bg-blue-50" 
+        : "border-green-200 bg-green-50"
+    }`}>
+      {/* Header */}
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <span className={`inline-block rounded-full px-3 py-1 text-xs font-medium ${
+            isCityPass 
+              ? "bg-blue-100 text-blue-700" 
+              : "bg-green-100 text-green-700"
+          }`}>
+            {isCityPass ? "CityPass" : "Cafe Wallet"}
+          </span>
+          {!isCityPass && (
+            <p className="text-sm font-medium text-zinc-700 mt-2">
+              {wallet.cafe_name || wallet.network_name || "—"}
+            </p>
+          )}
+        </div>
+        <span className="text-xs text-zinc-400">
+          ID: {wallet.id.slice(0, 8)}...
+        </span>
+      </div>
+
+      {/* Balance */}
+      <div className="mb-4">
+        <p className="text-sm text-zinc-600">Баланс</p>
+        <p className="text-3xl font-bold text-zinc-900 mt-1">
+          {wallet.balance_credits || 0} <span className="text-lg">кр.</span>
+        </p>
+      </div>
+
+      {/* Lifetime topup */}
+      <div className="pt-4 border-t border-zinc-200">
+        <div className="flex justify-between items-center">
+          <span className="text-xs text-zinc-500">Всего пополнено:</span>
+          <span className="text-sm font-medium text-emerald-600">
+            {wallet.lifetime_top_up_credits || 0} кр.
+          </span>
+        </div>
+        <div className="flex justify-between items-center mt-2">
+          <span className="text-xs text-zinc-500">Создан:</span>
+          <span className="text-xs text-zinc-600">
+            {new Date(wallet.created_at).toLocaleDateString("ru-RU")}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Wallet Type Badge (for transactions table)
+function WalletTypeBadge({ wallet }: { wallet: any }) {
+  if (!wallet) return <span className="text-zinc-400">—</span>;
+  
+  const isCityPass = wallet.wallet_type === "citypass";
+  return (
+    <span className={`inline-block rounded px-2 py-0.5 text-xs ${
+      isCityPass 
+        ? "bg-blue-100 text-blue-700" 
+        : "bg-green-100 text-green-700"
+    }`}>
+      {isCityPass ? "CP" : wallet.cafe_name?.slice(0, 12) || "Cafe"}
+    </span>
   );
 }
 

@@ -6,7 +6,8 @@ import { createAdminClient } from "../../../lib/supabase/admin";
 import { requireAdmin } from "../../../lib/supabase/roles";
 
 /**
- * Добавляет ручную транзакцию (начисление или списание)
+ * DEPRECATED: add_wallet_transaction RPC removed in canonical schema migration
+ * TODO: Implement direct transaction insertion or new canonical RPC
  */
 export async function addManualTransaction(
   userId: string,
@@ -15,87 +16,72 @@ export async function addManualTransaction(
   reason: string
 ) {
   const { userId: adminId } = await requireAdmin();
-  const supabase = createAdminClient();
-
-  // Определяем тип транзакции
-  const transactionType = type === "credit" ? "admin_credit" : "admin_debit";
-
-  const { data, error } = await supabase.rpc("add_wallet_transaction", {
-    user_id_param: userId,
-    amount_param: Math.abs(amount),
-    type_param: transactionType,
-    description_param: `Ручная операция: ${reason}`,
-    actor_user_id_param: adminId,
-  });
-
-  if (error) {
-    throw new Error(`Failed to add transaction: ${error.message}`);
-  }
-
-  revalidatePath("/admin/wallets");
-  revalidatePath(`/admin/wallets/${userId}`);
-
-  return data;
+  
+  // TEMPORARILY DISABLED - RPC deprecated
+  throw new Error(
+    "add_wallet_transaction RPC deprecated. Use new canonical wallet system. " +
+    "Migration: 20260205000003_unify_wallets_schema.sql"
+  );
+  
+  // TODO: Implement with canonical schema:
+  // 1. Get user's wallet(s) via get_user_wallets(p_user_id)
+  // 2. Insert into wallet_transactions with all canonical fields
+  // 3. Update wallet balance_credits directly
+  // 4. Revalidate paths
 }
 
 /**
- * Пересчитывает баланс кошелька
+ * DEPRECATED: sync_wallet_balance RPC removed in canonical schema migration
+ * Balance is now authoritative from balance_credits column, not calculated
  */
 export async function syncWalletBalance(walletId: string) {
   await requireAdmin();
-  const supabase = createAdminClient();
-
-  const { data, error } = await supabase.rpc("sync_wallet_balance", {
-    wallet_id_param: walletId,
-  });
-
-  if (error) {
-    throw new Error(`Failed to sync wallet balance: ${error.message}`);
-  }
-
-  revalidatePath("/admin/wallets");
-
-  return data;
+  
+  throw new Error(
+    "sync_wallet_balance RPC deprecated. " +
+    "Canonical schema uses balance_credits as source of truth."
+  );
 }
 
 /**
- * Получает кошелек пользователя
+ * Получает все кошельки пользователя (UPDATED: P4 - returns array)
  */
-export async function getUserWallet(userId: string) {
+export async function getUserWallets(userId: string) {
   await requireAdmin();
   const supabase = createAdminClient();
 
-  const { data, error } = await supabase.rpc("get_user_wallet", {
-    user_id_param: userId,
+  const { data, error } = await supabase.rpc("get_user_wallets", {
+    p_user_id: userId,
   });
 
   if (error) {
-    throw new Error(`Failed to get wallet: ${error.message}`);
+    throw new Error(`Failed to get wallets: ${error.message}`);
   }
 
-  return data;
+  return data || [];
 }
 
 /**
- * Получает транзакции кошелька
+ * Получает транзакции кошелька (UPDATED: direct query)
  */
 export async function getUserTransactions(
-  userId: string,
+  walletId: string,
   limit: number = 50,
   offset: number = 0
 ) {
   await requireAdmin();
   const supabase = createAdminClient();
 
-  const { data, error } = await supabase.rpc("get_wallet_transactions", {
-    user_id_param: userId,
-    limit_param: limit,
-    offset_param: offset,
-  });
+  const { data, error } = await supabase
+    .from("wallet_transactions")
+    .select("*")
+    .eq("wallet_id", walletId)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
 
   if (error) {
     throw new Error(`Failed to get transactions: ${error.message}`);
   }
 
-  return data;
+  return data || [];
 }

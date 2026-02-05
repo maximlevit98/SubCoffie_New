@@ -165,7 +165,9 @@ END $$;
 DO $$
 DECLARE
   tx_count int;
+  tx_record record;
 BEGIN
+  -- Получаем транзакции
   SELECT count(*) INTO tx_count
   FROM get_wallet_transactions(
     '44444444-4444-4444-4444-444444444444'::uuid,
@@ -177,6 +179,73 @@ BEGIN
     RAISE NOTICE '✅ PASS: Получено % транзакций', tx_count;
   ELSE
     RAISE EXCEPTION '❌ FAIL: Недостаточно транзакций: %', tx_count;
+  END IF;
+  
+  -- Проверяем наличие полей balance_before/after в транзакциях
+  SELECT * INTO tx_record
+  FROM get_wallet_transactions(
+    '44444444-4444-4444-4444-444444444444'::uuid,
+    1,
+    0
+  )
+  LIMIT 1;
+  
+  IF tx_record.balance_before IS NOT NULL AND tx_record.balance_after IS NOT NULL THEN
+    RAISE NOTICE '✅ PASS: Поля balance_before/after присутствуют (before: %, after: %)', 
+      tx_record.balance_before, tx_record.balance_after;
+  ELSE
+    RAISE EXCEPTION '❌ FAIL: Отсутствуют поля balance_before/after';
+  END IF;
+  
+  -- Проверяем что balance_after корректно рассчитан
+  IF tx_record.type IN ('topup', 'bonus', 'refund', 'admin_credit') THEN
+    IF tx_record.balance_after = tx_record.balance_before + tx_record.amount THEN
+      RAISE NOTICE '✅ PASS: balance_after корректно рассчитан для type=%', tx_record.type;
+    ELSE
+      RAISE EXCEPTION '❌ FAIL: Неверный расчет balance_after';
+    END IF;
+  ELSIF tx_record.type IN ('payment', 'admin_debit') THEN
+    IF tx_record.balance_after = tx_record.balance_before - abs(tx_record.amount) THEN
+      RAISE NOTICE '✅ PASS: balance_after корректно рассчитан для type=%', tx_record.type;
+    ELSE
+      RAISE EXCEPTION '❌ FAIL: Неверный расчет balance_after';
+    END IF;
+  END IF;
+END $$;
+
+-- Test 1.2.7b: add_wallet_transaction - проверка order_id и actor_user_id
+\echo ''
+\echo 'Test 1.2.7b: add_wallet_transaction - с order_id и actor_user_id'
+DO $$
+DECLARE
+  result jsonb;
+  test_order_id uuid := '11111111-1111-1111-1111-111111111111';
+  test_actor_id uuid := '22222222-2222-2222-2222-222222222222';
+  tx_id uuid;
+  tx_order_id uuid;
+  tx_actor_id uuid;
+BEGIN
+  -- Добавляем транзакцию с дополнительными параметрами
+  result := add_wallet_transaction(
+    '44444444-4444-4444-4444-444444444444'::uuid,
+    75,
+    'admin_credit',
+    'Admin adjustment with tracking',
+    test_order_id,  -- order_id
+    test_actor_id   -- actor_user_id
+  );
+  
+  tx_id := (result->>'transaction_id')::uuid;
+  
+  -- Проверяем что order_id и actor_user_id сохранились
+  SELECT order_id, actor_user_id INTO tx_order_id, tx_actor_id
+  FROM public.wallet_transactions
+  WHERE id = tx_id;
+  
+  IF tx_order_id = test_order_id AND tx_actor_id = test_actor_id THEN
+    RAISE NOTICE '✅ PASS: order_id и actor_user_id корректно сохранены';
+  ELSE
+    RAISE EXCEPTION '❌ FAIL: order_id или actor_user_id не сохранились';
   END IF;
 END $$;
 
