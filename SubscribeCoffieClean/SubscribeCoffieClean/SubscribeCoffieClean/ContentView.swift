@@ -190,25 +190,7 @@ struct ContentView: View {
                 case .walletChoice:
                     WalletChoiceView(
                         onCityPassSelected: {
-                            Task {
-                                do {
-                                    // Check if CityPass already exists
-                                    if let existingCityPass = realWalletStore.cityPassWallet {
-                                        realWalletStore.selectWallet(existingCityPass)
-                                        walletTopUpType = .citypass
-                                        walletTopUpScopeTitle = "CityPass"
-                                        isWalletTopUpPresented = true
-                                    } else {
-                                        // Create new CityPass wallet
-                                        let newWallet = try await realWalletStore.createCityPassWallet()
-                                        walletTopUpType = .citypass
-                                        walletTopUpScopeTitle = "CityPass"
-                                        isWalletTopUpPresented = true
-                                    }
-                                } catch {
-                                    AppLogger.debug("❌ Failed to create/select CityPass: \(error)")
-                                }
-                            }
+                            startCityPassTopUp(isSetupFlow: true)
                         },
                         onCityPassCafes: {
                             isCityPassCafesPresented = true
@@ -383,6 +365,11 @@ struct ContentView: View {
                 WalletTopUpView(wallet: wallet, onTopUpSuccess: {
                     Task {
                         await realWalletStore.refreshWallets()
+                        if pendingWalletType != nil {
+                            await MainActor.run {
+                                proceedAfterWalletSetup()
+                            }
+                        }
                     }
                 })
             } else {
@@ -400,9 +387,10 @@ struct ContentView: View {
         .sheet(isPresented: $isWalletDemoPresented) {
             WalletChoiceView(
                 onCityPassSelected: {
-                    walletTopUpType = .citypass
-                    walletTopUpScopeTitle = "CityPass"
-                    isWalletTopUpPresented = true
+                    isWalletDemoPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        startCityPassTopUp(isSetupFlow: false)
+                    }
                 },
                 onCityPassCafes: {
                     isCityPassCafesPresented = true
@@ -672,6 +660,33 @@ struct ContentView: View {
         if persistLastCafe {
             lastCafeId = cafe.id.uuidString
             lastCafeName = cafe.name
+        }
+    }
+
+    private func startCityPassTopUp(isSetupFlow: Bool) {
+        Task {
+            do {
+                if let existingCityPass = realWalletStore.cityPassWallet {
+                    realWalletStore.selectWallet(existingCityPass)
+                } else {
+                    _ = try await realWalletStore.createCityPassWallet()
+                }
+                
+                if isSetupFlow {
+                    pendingWalletType = .citypass
+                    pendingWalletScopeId = nil
+                    pendingWalletScopeName = nil
+                }
+                
+                walletTopUpType = .citypass
+                walletTopUpScopeTitle = "CityPass"
+                
+                await MainActor.run {
+                    isWalletTopUpPresented = true
+                }
+            } catch {
+                AppLogger.debug("❌ Failed to create/select CityPass: \(error)")
+            }
         }
     }
 
