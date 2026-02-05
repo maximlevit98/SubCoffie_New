@@ -578,26 +578,6 @@ BEGIN
       NOW()
     ) RETURNING id INTO v_transaction_id;
     
-    -- 6. Create wallet_transactions record for audit trail
-    INSERT INTO public.wallet_transactions (
-      wallet_id,
-      amount,
-      type,
-      balance_before,
-      balance_after,
-      description,
-      reference_id,
-      created_at
-    ) VALUES (
-      p_wallet_id,
-      -v_subtotal, -- Negative for deduction
-      'order_payment',
-      v_wallet_balance,
-      v_balance_after,
-      'Order payment for cafe: ' || p_cafe_id::text,
-      v_transaction_id,
-      NOW()
-    );
   END IF;
   
   -- Create order
@@ -645,6 +625,29 @@ BEGIN
     UPDATE public.payment_transactions
     SET order_id = v_order_id
     WHERE id = v_transaction_id;
+
+    -- Create wallet_transactions record for audit trail
+    INSERT INTO public.wallet_transactions (
+      wallet_id,
+      amount,
+      type,
+      description,
+      order_id,
+      actor_user_id,
+      balance_before,
+      balance_after,
+      created_at
+    ) VALUES (
+      p_wallet_id,
+      -v_subtotal, -- Negative for deduction
+      'payment',
+      'Order payment for cafe: ' || p_cafe_id::text || ' (tx: ' || v_transaction_id::text || ')',
+      v_order_id,
+      v_user_id,
+      v_wallet_balance,
+      v_balance_after,
+      NOW()
+    );
   END IF;
   
   -- Add order items
