@@ -228,48 +228,26 @@ struct ContentView: View {
                     }
 
                 case .map:
-                    MapSelectionView(
-                        cafes: availableCafes,
-                        isLoading: cafesAreLoading,
-                        errorMessage: cafesLoadError,
-                        onRetry: {
-                            Task { await fetchCafesIfNeeded(force: true) }
-                        },
-                        onSelectCafe: { cafe in
-                            if isSelectingWalletCafe {
-                pendingWalletScopeId = cafe.id.uuidString
-                pendingWalletScopeName = cafe.name
-                walletTopUpType = .cafe_wallet
-                walletTopUpScopeTitle = cafe.name
-                isWalletTopUpPresented = true
-                                isSelectingWalletCafe = false
-                            } else {
-                                Task {
-                                    await handleCafeSelection(cafe, persistLastCafe: true)
-                                }
+                    CafePickerView { cafe in
+                        if isSelectingWalletCafe {
+                            pendingWalletScopeId = cafe.id.uuidString
+                            pendingWalletScopeName = cafe.name
+                            walletTopUpType = .cafe_wallet
+                            walletTopUpScopeTitle = cafe.name
+                            isWalletTopUpPresented = true
+                            isSelectingWalletCafe = false
+                        } else {
+                            Task {
+                                await handleCafeSelection(cafe, persistLastCafe: true)
                             }
                         }
-                    )
-                    .task {
-                        await fetchCafesIfNeeded()
                     }
 
                 case .selectCafeForWallet:
-                    MapSelectionView(
-                        cafes: availableCafes,
-                        isLoading: cafesAreLoading,
-                        errorMessage: cafesLoadError,
-                        onRetry: {
-                            Task { await fetchCafesIfNeeded(force: true) }
-                        },
-                        onSelectCafe: { cafe in
-                            Task {
-                                await handleCafeWalletSelection(cafe)
-                            }
+                    CafePickerView { cafe in
+                        Task {
+                            await handleCafeWalletSelection(cafe)
                         }
-                    )
-                    .task {
-                        await fetchCafesIfNeeded()
                     }
 
                 case .cafe:
