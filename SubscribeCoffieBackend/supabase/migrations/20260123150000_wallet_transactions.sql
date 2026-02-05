@@ -6,7 +6,7 @@ create table if not exists public.wallet_transactions (
   amount int not null,
   type text not null,
   description text,
-  order_id uuid references public.orders(id) on delete set null,
+  order_id uuid,  -- ✅ Removed FK constraint, orders_core created later
   actor_user_id uuid references auth.users(id) on delete set null,
   balance_before int not null,
   balance_after int not null,

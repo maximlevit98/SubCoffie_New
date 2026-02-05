@@ -260,6 +260,8 @@ struct MockTopupResponse: Codable {
     let commission: Int?
     let amount_credited: Int?
     let provider_transaction_id: String?
+    let message: String?  // ✅ NEW: For idempotent responses
+    let status: String?  // ✅ NEW: Transaction status
 }
 
 // MARK: - Payment Intent Response

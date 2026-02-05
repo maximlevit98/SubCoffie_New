@@ -6,21 +6,31 @@
 alter table public.wallet_transactions 
   add column if not exists type text,
   add column if not exists description text,
-  add column if not exists order_id uuid references public.orders(id) on delete set null,
+  add column if not exists order_id uuid,  -- ✅ Removed FK, will add later after orders_core created
   add column if not exists actor_user_id uuid references auth.users(id) on delete set null,
   add column if not exists balance_before int,
   add column if not exists balance_after int;
 
 -- Мигрируем данные из старых колонок в новые (если есть данные)
-update public.wallet_transactions
-set 
-  type = case 
-    when direction = 'credit' then 'topup'
-    when direction = 'debit' then 'payment'
-    else 'topup' -- default fallback
-  end,
-  description = reason
-where type is null;
+-- Проверяем, существуют ли старые колонки
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns 
+    where table_name = 'wallet_transactions' and column_name = 'direction'
+  ) then
+    update public.wallet_transactions
+    set 
+      type = case 
+        when direction = 'credit' then 'topup'
+        when direction = 'debit' then 'payment'
+        else 'topup' -- default fallback
+      end,
+      description = reason
+    where type is null;
+  end if;
+end
+$$;
 
 -- Удаляем старые колонки (после миграции данных)
 alter table public.wallet_transactions

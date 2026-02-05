@@ -58,14 +58,40 @@ end
 where wallet_type is null;
 
 -- Migrate balance_credits (handle both 'balance' and 'credits_balance')
-update public.wallets
-set balance_credits = coalesce(
-  balance_credits,  -- if already set (from newer migrations)
-  balance,          -- from wallet_sync_functions.sql
-  credits_balance,  -- from mvp_coffee.sql
-  0                 -- fallback
-)
-where balance_credits is null or balance_credits = 0;
+do $$
+begin
+  -- Check if 'balance' column exists
+  if exists (
+    select 1 from information_schema.columns 
+    where table_name = 'wallets' and column_name = 'balance'
+  ) then
+    update public.wallets
+    set balance_credits = coalesce(
+      balance_credits,  -- if already set (from newer migrations)
+      balance,          -- from wallet_sync_functions.sql
+      credits_balance,  -- from mvp_coffee.sql
+      0                 -- fallback
+    )
+    where balance_credits is null or balance_credits = 0;
+  elsif exists (
+    select 1 from information_schema.columns 
+    where table_name = 'wallets' and column_name = 'credits_balance'
+  ) then
+    update public.wallets
+    set balance_credits = coalesce(
+      balance_credits,  -- if already set
+      credits_balance,  -- from mvp_coffee.sql
+      0                 -- fallback
+    )
+    where balance_credits is null or balance_credits = 0;
+  else
+    -- Both columns don't exist, balance_credits is already canonical
+    update public.wallets
+    set balance_credits = coalesce(balance_credits, 0)
+    where balance_credits is null;
+  end if;
+end
+$$;
 
 -- Merge bonus_balance into balance_credits if bonus_balance exists
 do $$

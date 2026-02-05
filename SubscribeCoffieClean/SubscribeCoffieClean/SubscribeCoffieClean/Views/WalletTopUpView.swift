@@ -22,6 +22,7 @@ struct CommissionResponse: Codable {
 
 struct WalletTopUpView: View {
     let wallet: Wallet
+    var onTopUpSuccess: (() -> Void)? = nil // Callback to refresh wallets
     
     @Environment(\.dismiss) private var dismiss
     @StateObject private var walletService = WalletService()
@@ -427,6 +428,9 @@ struct WalletTopUpView: View {
             topupResult = result
             showSuccessAlert = true
             isProcessing = false
+            
+            // Call callback to refresh wallets
+            onTopUpSuccess?()
             
         } catch {
             errorMessage = "Ошибка: \(error.localizedDescription)"

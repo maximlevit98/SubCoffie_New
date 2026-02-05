@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import Auth
 
 @MainActor
 class WalletService: ObservableObject {
@@ -106,7 +107,19 @@ class WalletService: ObservableObject {
     /// Mock wallet top-up (simulates payment) - DEMO MODE ONLY
     /// For MVP: This is the ONLY payment method available (instant credits, no real money)
     /// Real payments: Requires enabling backend real_payment_integration.sql and completing PAYMENT_SECURITY.md checklist
-    func mockWalletTopup(walletId: UUID, amount: Int, paymentMethodId: UUID?) async throws -> MockTopupResponse {
+    /// 
+    /// - Parameters:
+    ///   - walletId: UUID of the wallet to top up
+    ///   - amount: Amount in credits to add
+    ///   - paymentMethodId: Optional payment method ID
+    ///   - idempotencyKey: Optional idempotency key (if nil, generates automatically)
+    /// - Returns: MockTopupResponse with transaction details
+    func mockWalletTopup(
+        walletId: UUID, 
+        amount: Int, 
+        paymentMethodId: UUID?,
+        idempotencyKey: String? = nil  // ✅ NEW: Idempotency support
+    ) async throws -> MockTopupResponse {
         var params: [String: Any] = [
             "p_wallet_id": walletId.uuidString,
             "p_amount": amount
@@ -116,10 +129,41 @@ class WalletService: ObservableObject {
             params["p_payment_method_id"] = paymentMethodId.uuidString
         }
         
+        // ✅ Generate or use provided idempotency key
+        let key: String
+        if let providedKey = idempotencyKey {
+            key = providedKey
+        } else {
+            // Format: {userId}_{timestamp}_{uuid}
+            // Get userId from AuthService
+            let userId: String
+            if let currentUserId = await AuthService.shared.currentUser?.id {
+                userId = currentUserId.uuidString.lowercased()
+            } else {
+                userId = "unknown"
+            }
+            
+            let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+            let uuid = UUID().uuidString.lowercased()
+            key = "\(userId)_\(timestamp)_\(uuid)"
+        }
+        
+        params["p_idempotency_key"] = key
+        
+        #if DEBUG
+        print("💳 [WalletService] Mock top-up with idempotency key: \(key)")
+        #endif
+        
         let response: MockTopupResponse = try await apiClient.rpc(
             "mock_wallet_topup",
             params: params
         )
+        
+        #if DEBUG
+        if let message = response.message, message.contains("Idempotent") {
+            print("♻️ [WalletService] Idempotent response: Transaction already processed")
+        }
+        #endif
         
         return response
     }

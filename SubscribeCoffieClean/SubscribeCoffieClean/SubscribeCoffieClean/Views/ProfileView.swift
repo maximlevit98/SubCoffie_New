@@ -7,8 +7,7 @@ struct ProfileView: View {
     let birthDate: Date
     let city: String
 
-    @ObservedObject var cityPassWallet: WalletStore
-    @ObservedObject var cafeWallet: CafeWalletStore
+    @ObservedObject var realWalletStore: RealWalletStore
 
     let availableCafes: [CafeSummary]
     let onClose: () -> Void
@@ -21,6 +20,7 @@ struct ProfileView: View {
     @State private var showCafeOnboarding: Bool = false
     @State private var showLoyaltyDashboard: Bool = false
     @State private var showSubscriptionPlans: Bool = false
+    @State private var showTransactionHistory: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -30,6 +30,7 @@ struct ProfileView: View {
                     subscriptionSection
                     loyaltySection
                     orderHistorySection
+                    transactionHistorySection
                     cityPassSection
                     cafeWalletSection
                     cafeOnboardingSection
@@ -60,7 +61,9 @@ struct ProfileView: View {
                 CafePickerSheet(
                     cafes: availableCafes,
                     onSelect: { cafe in
-                        cafeWallet.selectCafe(cafe)
+                        Task {
+                            await createCafeWallet(cafeId: cafe.id)
+                        }
                         isCafePickerPresented = false
                     },
                     onClose: { isCafePickerPresented = false }
@@ -91,6 +94,30 @@ struct ProfileView: View {
                 // Note: In production, extract user ID from auth session
                 if let userId = UUID(uuidString: "00000000-0000-0000-0000-000000000000") {
                     SubscriptionPlansView(userId: userId)
+                }
+            }
+            .sheet(isPresented: $showTransactionHistory) {
+                if let selectedWallet = realWalletStore.selectedWallet {
+                    TransactionHistoryView(wallet: selectedWallet)
+                } else {
+                    VStack(spacing: 20) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(.orange)
+                        Text("Кошелёк не выбран")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        Text("Пожалуйста, выберите кошелёк для просмотра истории транзакций")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                        Button("Закрыть") {
+                            showTransactionHistory = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding()
                 }
             }
         }
@@ -208,6 +235,32 @@ struct ProfileView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
         }
     }
+    
+    private var transactionHistorySection: some View {
+        Button(action: {
+            showTransactionHistory = true
+        }) {
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "list.bullet.rectangle.fill")
+                            .foregroundColor(.blue)
+                        Text("История транзакций")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                    }
+                    Text("Пополнения, платежи и возвраты")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.secondary)
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+        }
+    }
 
     private var cityPassSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -215,29 +268,35 @@ struct ProfileView: View {
                 Text("CityPass кошелёк")
                     .font(.headline)
                 Spacer()
-                badge(text: cityPassWallet.loyaltyPackage.titleRu)
-                badge(text: cityPassWallet.tier.titleRu)
-            }
-            walletRow(label: "Credits", value: cityPassWallet.credits)
-            walletRow(label: "Bonus+", value: cityPassWallet.bonusBalance)
-            walletRow(label: "Lifetime TopUp", value: cityPassWallet.lifetimeTopUp)
-
-            HStack(spacing: 12) {
-                Button("+500 Credits (тест)") {
-                    cityPassWallet.topUpDemo(credits: 500)
+                if let cityPass = realWalletStore.wallets.first(where: { $0.walletType == .citypass }) {
+                    badge(text: "\(cityPass.balanceCredits) ₽")
+                } else {
+                    badge(text: "Не создан")
                 }
-                .buttonStyle(.bordered)
-
-                Button("+1000 Credits (тест)") {
-                    cityPassWallet.topUpDemo(credits: 1000)
+            }
+            
+            if let cityPass = realWalletStore.wallets.first(where: { $0.walletType == .citypass }) {
+                walletRow(label: "Баланс", value: cityPass.balanceCredits)
+                walletRow(label: "Всего пополнено", value: cityPass.lifetimeTopUpCredits)
+                
+                Button("Выбрать как активный") {
+                    realWalletStore.selectWallet(cityPass)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .disabled(realWalletStore.selectedWallet?.id == cityPass.id)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("CityPass кошелёк не создан")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Создать CityPass") {
+                        Task {
+                            await createCityPassWallet()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
-
-            Button("Сбросить демо кошелёк", role: .destructive) {
-                cityPassWallet.resetDemoWallet()
-            }
-            .buttonStyle(.bordered)
         }
         .padding()
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
@@ -249,41 +308,25 @@ struct ProfileView: View {
                 Text("Кошелёк кофейни")
                     .font(.headline)
                 Spacer()
-                if let name = cafeWallet.cafeName {
-                    badge(text: name)
+                if let cafeWallet = realWalletStore.wallets.first(where: { $0.walletType == .cafe_wallet }) {
+                    badge(text: cafeWallet.displaySubtitle ?? "Кафе")
                 } else {
-                    badge(text: "Не выбрана")
+                    badge(text: "Не создан")
                 }
             }
 
-            if let name = cafeWallet.cafeName {
-                infoRow(label: "Кофейня/бренд", value: name)
-                walletRow(label: "Credits", value: cafeWallet.credits)
-                walletRow(label: "Bonus+", value: cafeWallet.bonus)
-
-                HStack(spacing: 12) {
-                    Button("+300 (тест)") {
-                        cafeWallet.topUp(amount: 300)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("+700 (тест)") {
-                        cafeWallet.topUp(amount: 700)
-                    }
-                    .buttonStyle(.bordered)
+            if let cafeWallet = realWalletStore.wallets.first(where: { $0.walletType == .cafe_wallet }) {
+                if let cafeName = cafeWallet.cafeName {
+                    infoRow(label: "Кофейня/бренд", value: cafeName)
                 }
+                walletRow(label: "Баланс", value: cafeWallet.balanceCredits)
+                walletRow(label: "Всего пополнено", value: cafeWallet.lifetimeTopUpCredits)
 
-                HStack(spacing: 12) {
-                    Button("Выбрать другую") {
-                        isCafePickerPresented = true
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Сбросить", role: .destructive) {
-                        cafeWallet.reset()
-                    }
-                    .buttonStyle(.bordered)
+                Button("Выбрать как активный") {
+                    realWalletStore.selectWallet(cafeWallet)
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(realWalletStore.selectedWallet?.id == cafeWallet.id)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Кошелёк кофейни не подключён")
@@ -358,6 +401,26 @@ struct ProfileView: View {
         let f = DateFormatter()
         f.dateStyle = .medium
         return f.string(from: date)
+    }
+    
+    // MARK: - Wallet Actions
+    
+    private func createCityPassWallet() async {
+        do {
+            _ = try await realWalletStore.createCityPassWallet()
+            await realWalletStore.loadWallets()
+        } catch {
+            print("❌ Failed to create CityPass wallet: \(error)")
+        }
+    }
+    
+    private func createCafeWallet(cafeId: UUID?) async {
+        do {
+            _ = try await realWalletStore.createCafeWallet(cafeId: cafeId, networkId: nil)
+            await realWalletStore.loadWallets()
+        } catch {
+            print("❌ Failed to create Cafe wallet: \(error)")
+        }
     }
 }
 

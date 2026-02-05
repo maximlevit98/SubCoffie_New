@@ -24,13 +24,26 @@ comment on column public.payment_transactions.idempotency_key is
 -- ============================================================================
 
 -- Webhook event_id is already unique and serves as idempotency key
--- Add index for faster lookups
-create index if not exists payment_webhook_events_event_id_idx 
-  on public.payment_webhook_events(event_id);
+-- Add index for faster lookups (only if table exists)
+do $$
+begin
+  if exists (
+    select 1 from information_schema.tables 
+    where table_name = 'payment_webhook_events' and table_schema = 'public'
+  ) then
+    create index if not exists payment_webhook_events_event_id_idx 
+      on public.payment_webhook_events(event_id);
+  end if;
+end
+$$;
 
 -- ============================================================================
 -- 3. Update mock_wallet_topup to support idempotency
 -- ============================================================================
+
+-- Drop existing function to allow signature change
+drop function if exists public.mock_wallet_topup(uuid, int, uuid);
+drop function if exists public.mock_wallet_topup(uuid, int, uuid, text);
 
 create or replace function public.mock_wallet_topup(
   p_wallet_id uuid,
