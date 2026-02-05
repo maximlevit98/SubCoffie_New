@@ -197,12 +197,9 @@ begin
     create policy "Own wallets insert" on public.wallets
       for insert with check (auth.uid() = user_id);
   end if;
-  if not exists (
-    select 1 from pg_policies where schemaname='public' and tablename='wallets' and policyname='Own wallets update'
-  ) then
-    create policy "Own wallets update" on public.wallets
-      for update using (auth.uid() = user_id);
-  end if;
+  -- REMOVED: "Own wallets update" policy
+  -- Users can only SELECT their wallets, not UPDATE balance directly.
+  -- Balance updates must be done through secure RPC functions or backend triggers.
 end$$;
 
 alter table public.orders enable row level security;
