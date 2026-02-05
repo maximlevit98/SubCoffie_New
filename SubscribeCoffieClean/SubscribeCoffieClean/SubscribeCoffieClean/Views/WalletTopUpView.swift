@@ -4,9 +4,21 @@
 //
 //  DEMO MODE ONLY: Mock payments, no real money
 //  Real payment integration: See PAYMENT_SECURITY.md in backend
+//  UPDATED: 2026-02-05 - Commission rates from backend (P0)
 //
 
 import SwiftUI
+import Supabase
+import PostgREST
+
+// MARK: - Commission Response Model
+
+struct CommissionResponse: Codable {
+    let wallet_id: String
+    let wallet_type: String
+    let operation_type: String
+    let commission_percent: Double
+}
 
 struct WalletTopUpView: View {
     let wallet: Wallet
@@ -19,21 +31,30 @@ struct WalletTopUpView: View {
     @State private var showSuccessAlert = false
     @State private var topupResult: MockTopupResponse?
     
+    // Commission from backend
+    @State private var commissionPercent: Double? = nil
+    @State private var isLoadingCommission: Bool = true
+    
     private let presetAmounts: [Int] = [300, 500, 1000, 2000]
     private let maxAmount: Int = 99999
     
-    // Commission rate based on wallet type
-    private var commissionPercent: Double {
+    // Fallback commission rates (used if backend unavailable)
+    private var fallbackCommissionPercent: Double {
         switch wallet.walletType {
         case .citypass:
-            return 7.0 // CityPass: 7%
+            return 7.0 // CityPass fallback: 7%
         case .cafe_wallet:
-            return 4.0 // Cafe Wallet: 4%
+            return 4.0 // Cafe Wallet fallback: 4%
         }
     }
     
+    // Actual commission to use (from backend or fallback)
+    private var actualCommissionPercent: Double {
+        return commissionPercent ?? fallbackCommissionPercent
+    }
+    
     private var commissionAmount: Int {
-        return Int(Double(parsedAmount) * commissionPercent / 100.0)
+        return Int(Double(parsedAmount) * actualCommissionPercent / 100.0)
     }
     
     private var amountCredited: Int {
@@ -46,6 +67,21 @@ struct WalletTopUpView: View {
                 VStack(spacing: 24) {
                     // DEMO MODE Banner (Always visible)
                     demoBanner
+                    
+                    // Commission loading indicator
+                    if isLoadingCommission {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Загрузка тарифов комиссии...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                    }
                     
                     header
                     balanceBlock
@@ -73,6 +109,9 @@ struct WalletTopUpView: View {
                         dismiss()
                     }
                 }
+            }
+            .task {
+                await fetchCommissionRate()
             }
             .alert("✅ Кошелёк пополнен!", isPresented: $showSuccessAlert) {
                 Button("OK") {
@@ -257,14 +296,33 @@ struct WalletTopUpView: View {
             }
             
             HStack {
-                Text("Комиссия (\(String(format: "%.0f", commissionPercent))%)")
-                    .font(.subheadline)
-                    .foregroundColor(.orange)
+                HStack(spacing: 4) {
+                    Text("Комиссия (\(String(format: "%.2f", actualCommissionPercent))%)")
+                        .font(.subheadline)
+                        .foregroundColor(.orange)
+                    
+                    if commissionPercent != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
                 Spacer()
                 Text("-\(commissionAmount) ₽")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                     .foregroundColor(.orange)
+            }
+            
+            if commissionPercent == nil {
+                Text("Используется локальный тариф (backend недоступен)")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             
             Divider()
@@ -320,6 +378,37 @@ struct WalletTopUpView: View {
     }
     
     // MARK: - Top-Up Logic
+    
+    /// Fetch commission rate from backend
+    private func fetchCommissionRate() async {
+        isLoadingCommission = true
+        
+        do {
+            // Call RPC to get commission for this wallet
+            let supabase = SupabaseClientProvider.client
+            
+            let response: CommissionResponse = try await supabase
+                .rpc("get_commission_for_wallet", params: ["p_wallet_id": wallet.id.uuidString])
+                .execute()
+                .value
+            
+            // Update commission from backend
+            await MainActor.run {
+                self.commissionPercent = response.commission_percent
+                self.isLoadingCommission = false
+            }
+            
+            print("✅ Commission loaded from backend: \(response.commission_percent)% for \(response.wallet_type)")
+            
+        } catch {
+            // Fallback to hardcoded rates
+            print("⚠️ Failed to load commission from backend, using fallback: \(error.localizedDescription)")
+            await MainActor.run {
+                self.commissionPercent = nil // Will use fallback
+                self.isLoadingCommission = false
+            }
+        }
+    }
     
     private func performTopUp() async {
         guard parsedAmount > 0 else { return }

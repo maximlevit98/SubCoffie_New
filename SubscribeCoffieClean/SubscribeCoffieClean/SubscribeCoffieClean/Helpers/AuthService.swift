@@ -225,18 +225,18 @@ class AuthService: ObservableObject {
             AppLogger.debug("✅ Apple sign in successful")
             
             if isAuthenticated {
-                // Update profile with Apple ID data if available
-                if let fullName = appleIDCredential.fullName {
-                    let name = [fullName.givenName, fullName.familyName]
-                        .compactMap { $0 }
-                        .joined(separator: " ")
-                    
-                    if !name.isEmpty {
-                        _ = try? await updateProfile(fullName: name)
-                    }
-                }
+            // Update profile with Apple ID data if available
+            if let fullName = appleIDCredential.fullName {
+                let name = [fullName.givenName, fullName.familyName]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
                 
-                await fetchUserProfile()
+                if !name.isEmpty {
+                    _ = try? await updateProfile(fullName: name)
+                }
+            }
+            
+            await fetchUserProfile()
             }
         } catch {
             errorMessage = error.localizedDescription
