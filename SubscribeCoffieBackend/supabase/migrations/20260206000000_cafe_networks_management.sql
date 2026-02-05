@@ -1,6 +1,14 @@
 -- Migration: Cafe Networks Management RPC Functions
 -- Description: RPC functions for managing cafe networks (creating, adding/removing cafes)
 -- Date: 2026-02-06
+-- Updated: 2026-02-05 - Added grants, enabled for iOS integration (P1)
+
+-- ============================================================================
+-- IMPORTANT: Tables already exist in 20260201000002_wallet_types_mock_payments.sql
+-- - wallet_networks
+-- - cafe_network_members
+-- This migration only adds RPC functions.
+-- ============================================================================
 
 -- ============================================================================
 -- 1. RPC: Create Network
@@ -158,7 +166,7 @@ $$;
 comment on function public.remove_cafe_from_network is 'Remove a cafe from a network (admin/owner only)';
 
 -- ============================================================================
--- 4. RPC: Get Network Cafes
+-- 4. RPC: Get Network Cafes (PUBLIC - Used by iOS)
 -- ============================================================================
 
 create or replace function public.get_network_cafes(p_network_id uuid)
@@ -193,10 +201,10 @@ begin
 end;
 $$;
 
-comment on function public.get_network_cafes is 'Get all cafes in a network';
+comment on function public.get_network_cafes is 'Get all cafes in a network (public access for iOS)';
 
 -- ============================================================================
--- 5. RPC: Get Cafe Network
+-- 5. RPC: Get Cafe Network (PUBLIC - Used by iOS)
 -- ============================================================================
 
 create or replace function public.get_cafe_network(p_cafe_id uuid)
@@ -228,7 +236,7 @@ begin
 end;
 $$;
 
-comment on function public.get_cafe_network is 'Get the network a cafe belongs to (if any)';
+comment on function public.get_cafe_network is 'Get the network a cafe belongs to (public access for iOS)';
 
 -- ============================================================================
 -- 6. RPC: Get All Networks
@@ -496,3 +504,29 @@ end;
 $$;
 
 comment on function public.get_available_cafes_for_network is 'Get all cafes with their network membership status';
+
+-- ============================================================================
+-- 11. Grant Execute Permissions
+-- ============================================================================
+
+-- Public read RPCs (used by iOS)
+grant execute on function public.get_cafe_network(uuid) to anon, authenticated;
+grant execute on function public.get_network_cafes(uuid) to anon, authenticated;
+grant execute on function public.get_available_cafes_for_network(uuid) to anon, authenticated;
+
+-- Management RPCs (authenticated only, with internal role checks)
+grant execute on function public.create_network(text, uuid, decimal) to authenticated;
+grant execute on function public.add_cafe_to_network(uuid, uuid) to authenticated;
+grant execute on function public.remove_cafe_from_network(uuid, uuid) to authenticated;
+grant execute on function public.update_network(uuid, text, decimal) to authenticated;
+grant execute on function public.delete_network(uuid) to authenticated;
+grant execute on function public.get_all_networks(int, int) to authenticated;
+grant execute on function public.get_network_details(uuid) to authenticated;
+
+-- ============================================================================
+-- Migration Complete
+-- ============================================================================
+
+-- Tables (wallet_networks, cafe_network_members) already exist from 20260201000002
+-- RLS policies already exist from 20260201000002
+-- This migration adds 10 RPC functions + grants for iOS/admin usage
