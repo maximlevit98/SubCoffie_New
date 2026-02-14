@@ -87,6 +87,14 @@ struct ContentView: View {
         Array(availableCafes.prefix(3))
     }
 
+    private var hasPresentedModal: Bool {
+        isCityPassCafesPresented ||
+        walletTopUpWallet != nil ||
+        isWalletDemoPresented ||
+        isProfilePresented ||
+        isWalletFlowLoading
+    }
+
     private var canGoBack: Bool {
         switch currentScreen {
         case .login, .onboarding, .walletChoice:
@@ -177,7 +185,9 @@ struct ContentView: View {
                             }
                         },
                         onCityPassCafes: {
-                            isCityPassCafesPresented = true
+                            if !hasPresentedModal {
+                                isCityPassCafesPresented = true
+                            }
                         },
                         onCafeWalletSelected: {
                             pendingWalletType = .cafe_wallet
@@ -295,7 +305,10 @@ struct ContentView: View {
                     showsProfile: authService.isAuthenticated,
                     onProfile: { isProfilePresented = true },
                     showsWalletButton: authService.isAuthenticated && currentScreen != .login,
-                    onWallet: { isWalletDemoPresented = true }
+                    onWallet: {
+                        guard !hasPresentedModal else { return }
+                        isWalletDemoPresented = true
+                    }
                 )
                 .zIndex(1)
             }
@@ -344,7 +357,12 @@ struct ContentView: View {
                     }
                 },
                 onCityPassCafes: {
-                    isCityPassCafesPresented = true
+                    isWalletDemoPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        if !hasPresentedModal {
+                            isCityPassCafesPresented = true
+                        }
+                    }
                 },
                 onCafeWalletSelected: {
                     pendingWalletType = .cafe_wallet
@@ -547,6 +565,9 @@ struct ContentView: View {
         isWalletFlowLoading = true
         defer { isWalletFlowLoading = false }
 
+        isCityPassCafesPresented = false
+        isWalletDemoPresented = false
+
         pendingWalletType = .citypass
         pendingWalletScopeId = nil
         pendingWalletScopeName = nil
@@ -581,6 +602,9 @@ struct ContentView: View {
     private func startCafeWalletTopUpFlow(for cafe: CafeSummary) async {
         isWalletFlowLoading = true
         defer { isWalletFlowLoading = false }
+
+        isCityPassCafesPresented = false
+        isWalletDemoPresented = false
 
         pendingWalletType = .cafe_wallet
         pendingWalletScopeId = cafe.id.uuidString
