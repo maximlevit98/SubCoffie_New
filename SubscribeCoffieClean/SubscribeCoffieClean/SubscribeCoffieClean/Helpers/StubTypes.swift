@@ -32,14 +32,7 @@ struct LoginHistoryItemStub: Codable, Identifiable {
 }
 
 // MARK: - Order Stubs
-struct OrderHistoryItem: Codable, Identifiable {
-    let id: UUID
-    let cafeId: UUID
-    let cafeName: String
-    let totalAmount: Int
-    let status: String
-    let createdAt: Date
-}
+// OrderHistoryItem moved to OrderHistoryView.swift
 
 struct OrderStatistics: Codable {
     let totalOrders: Int

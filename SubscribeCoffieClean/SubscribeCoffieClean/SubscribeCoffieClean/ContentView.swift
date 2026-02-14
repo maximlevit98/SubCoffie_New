@@ -443,6 +443,7 @@ struct ContentView: View {
             }
         }
         .environmentObject(authService)
+        .environmentObject(realWalletStore)
     }
 
     // MARK: - Auth logic (real Supabase Auth)

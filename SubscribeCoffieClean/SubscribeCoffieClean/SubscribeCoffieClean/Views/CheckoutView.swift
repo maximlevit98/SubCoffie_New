@@ -117,6 +117,12 @@ struct CheckoutView: View {
             return
         }
         
+        guard let selectedWallet = realWalletStore.selectedWallet else {
+            errorMessage = "Кошелёк не выбран"
+            showError = true
+            return
+        }
+        
         isProcessing = true
         errorMessage = nil
         
@@ -135,9 +141,10 @@ struct CheckoutView: View {
                 print("🛒 [CheckoutView] Creating order for cafe: \(cafe.name)")
                 print("🛒 [CheckoutView] Items count: \(items.count)")
                 print("🛒 [CheckoutView] Total: \(cart.subtotalCredits) credits")
+                print("🛒 [CheckoutView] Wallet: \(selectedWallet.displayTitle), Balance: \(selectedWallet.balanceCredits)")
                 #endif
                 
-                // Create order using OrderService with real user data
+                // Create order using OrderService with real wallet
                 let customerName = authService.userProfile?.fullName ?? "Unknown User"
                 let customerPhone = authService.userProfile?.phone ?? ""
                 
@@ -148,13 +155,20 @@ struct CheckoutView: View {
                     customerPhone: customerPhone,
                     customerNotes: nil,
                     paymentMethod: "wallet",
+                    walletId: selectedWallet.id,  // ✅ Pass wallet ID
                     items: items
                 )
                 
                 #if DEBUG
                 print("✅ [CheckoutView] Order created successfully: \(result.orderId)")
                 print("✅ [CheckoutView] Order number: \(result.orderNumber)")
+                if let balanceAfter = result.walletBalanceAfter {
+                    print("✅ [CheckoutView] Wallet balance after: \(balanceAfter) credits")
+                }
                 #endif
+                
+                // Refresh wallets to update balance
+                await realWalletStore.refreshWallets()
                 
                 await MainActor.run {
                     onOrderSuccess(result.orderId)
@@ -162,6 +176,16 @@ struct CheckoutView: View {
                     isProcessing = false
                 }
                 
+            } catch let error as OrderServiceError {
+                #if DEBUG
+                print("❌ [CheckoutView] Order service error: \(error)")
+                #endif
+                
+                await MainActor.run {
+                    isProcessing = false
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
             } catch {
                 #if DEBUG
                 print("❌ [CheckoutView] Failed to create order: \(error)")

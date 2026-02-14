@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Auth
+import Combine
 
 struct OrderStatusView: View {
     let orderId: UUID

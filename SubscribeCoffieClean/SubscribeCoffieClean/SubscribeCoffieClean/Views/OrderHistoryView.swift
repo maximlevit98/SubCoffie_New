@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Auth
+import Combine
 
 struct OrderHistoryView: View {
     @EnvironmentObject var authService: AuthService
