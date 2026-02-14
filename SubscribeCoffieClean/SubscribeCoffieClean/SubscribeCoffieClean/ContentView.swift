@@ -67,6 +67,7 @@ struct ContentView: View {
     @State private var pendingWalletScopeName: String? = nil
     @State private var pendingBonusToUse: Int = 0
     @State private var isProfilePresented: Bool = false
+    @State private var isWalletFlowLoading: Bool = false
     @State private var walletFlowErrorMessage: String? = nil
     @State private var showWalletFlowError: Bool = false
     
@@ -299,6 +300,21 @@ struct ContentView: View {
                 .zIndex(1)
             }
         }
+        .overlay {
+            if isWalletFlowLoading {
+                ZStack {
+                    Color.black.opacity(0.2).ignoresSafeArea()
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Подготавливаем кошелек...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+        }
         .sheet(isPresented: $isCityPassCafesPresented) {
             CityPassCafesView(cafes: cityPassCafes)
         }
@@ -528,9 +544,28 @@ struct ContentView: View {
 
     @MainActor
     private func startCityPassTopUpFlow() async {
+        isWalletFlowLoading = true
+        defer { isWalletFlowLoading = false }
+
         pendingWalletType = .citypass
         pendingWalletScopeId = nil
         pendingWalletScopeName = nil
+
+        if authService.currentUser == nil {
+            await authService.checkSession()
+        }
+
+        guard authService.currentUser != nil else {
+            handleWalletFlowError(WalletServiceError.authenticationRequired)
+            return
+        }
+
+        // Fast path: already in memory
+        if let existing = realWalletStore.cityPassWallet {
+            realWalletStore.selectWallet(existing)
+            walletTopUpWallet = existing
+            return
+        }
 
         await realWalletStore.loadWallets()
 
@@ -551,11 +586,30 @@ struct ContentView: View {
 
     @MainActor
     private func startCafeWalletTopUpFlow(for cafe: CafeSummary) async {
+        isWalletFlowLoading = true
+        defer { isWalletFlowLoading = false }
+
         pendingWalletType = .cafe_wallet
         pendingWalletScopeId = cafe.id.uuidString
         pendingWalletScopeName = cafe.name
         cafeWalletCafeId = cafe.id.uuidString
         cafeWalletCafeName = cafe.name
+
+        if authService.currentUser == nil {
+            await authService.checkSession()
+        }
+
+        guard authService.currentUser != nil else {
+            handleWalletFlowError(WalletServiceError.authenticationRequired)
+            return
+        }
+
+        // Fast path: already in memory
+        if let existing = realWalletStore.cafeWallet(forCafe: cafe.id) {
+            realWalletStore.selectWallet(existing)
+            walletTopUpWallet = existing
+            return
+        }
 
         await realWalletStore.loadWallets()
 
