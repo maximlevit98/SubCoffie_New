@@ -120,6 +120,9 @@ struct ProfileView: View {
                     .padding()
                 }
             }
+            .task {
+                await realWalletStore.loadWallets()
+            }
         }
     }
 
