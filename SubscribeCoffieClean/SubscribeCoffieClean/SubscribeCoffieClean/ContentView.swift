@@ -70,6 +70,10 @@ struct ContentView: View {
     @State private var isWalletFlowLoading: Bool = false
     @State private var walletFlowErrorMessage: String? = nil
     @State private var showWalletFlowError: Bool = false
+    @State private var showWalletCreateStep: Bool = false
+    @State private var walletCreateType: WalletType = .citypass
+    @State private var walletCreateScopeName: String? = nil
+    @State private var walletCreateCafeId: UUID? = nil
     
     // Services
     private let orderService = OrderService()
@@ -92,7 +96,8 @@ struct ContentView: View {
         walletTopUpWallet != nil ||
         isWalletDemoPresented ||
         isProfilePresented ||
-        isWalletFlowLoading
+        isWalletFlowLoading ||
+        showWalletCreateStep
     }
 
     private var canGoBack: Bool {
@@ -388,6 +393,21 @@ struct ContentView: View {
                 }
             )
         }
+        .sheet(isPresented: $showWalletCreateStep) {
+            WalletCreateStepView(
+                walletType: walletCreateType,
+                scopeName: walletCreateScopeName,
+                onCreate: {
+                    try await handleWalletCreate()
+                },
+                onCancel: {
+                    showWalletCreateStep = false
+                    pendingWalletType = nil
+                    pendingWalletScopeId = nil
+                    pendingWalletScopeName = nil
+                }
+            )
+        }
         .alert("Ошибка кошелька", isPresented: $showWalletFlowError) {
             Button("ОК", role: .cancel) { }
         } message: {
@@ -583,15 +603,17 @@ struct ContentView: View {
 
         await realWalletStore.loadWallets()
 
-        do {
-            guard let walletToTopUp = realWalletStore.cityPassWallet else {
-                throw WalletServiceError.unknown("Сначала создайте CityPass кошелёк")
-            }
-
-            realWalletStore.selectWallet(walletToTopUp)
-            walletTopUpWallet = walletToTopUp
-        } catch {
-            handleWalletFlowError(error)
+        // Check if wallet already exists
+        if let existingWallet = realWalletStore.cityPassWallet {
+            // Wallet exists -> go directly to top-up
+            realWalletStore.selectWallet(existingWallet)
+            walletTopUpWallet = existingWallet
+        } else {
+            // Wallet doesn't exist -> show create step
+            walletCreateType = .citypass
+            walletCreateScopeName = nil
+            walletCreateCafeId = nil
+            showWalletCreateStep = true
         }
     }
 
@@ -620,15 +642,17 @@ struct ContentView: View {
 
         await realWalletStore.loadWallets()
 
-        do {
-            guard let walletToTopUp = realWalletStore.cafeWallet(forCafe: cafe.id) else {
-                throw WalletServiceError.unknown("Сначала создайте кошелёк для кофейни \"\(cafe.name)\"")
-            }
-
-            realWalletStore.selectWallet(walletToTopUp)
-            walletTopUpWallet = walletToTopUp
-        } catch {
-            handleWalletFlowError(error)
+        // Check if wallet already exists for this cafe
+        if let existingWallet = realWalletStore.cafeWallet(forCafe: cafe.id) {
+            // Wallet exists -> go directly to top-up
+            realWalletStore.selectWallet(existingWallet)
+            walletTopUpWallet = existingWallet
+        } else {
+            // Wallet doesn't exist -> show create step
+            walletCreateType = .cafe_wallet
+            walletCreateScopeName = cafe.name
+            walletCreateCafeId = cafe.id
+            showWalletCreateStep = true
         }
     }
 
@@ -640,6 +664,47 @@ struct ContentView: View {
 
         walletFlowErrorMessage = error.localizedDescription
         showWalletFlowError = true
+    }
+
+    @MainActor
+    private func handleWalletCreate() async throws {
+        switch walletCreateType {
+        case .citypass:
+            // Create CityPass wallet
+            let createdWallet = try await realWalletStore.createCityPassWallet()
+            
+            // Close create step
+            showWalletCreateStep = false
+            
+            // Select the newly created wallet
+            realWalletStore.selectWallet(createdWallet)
+            
+            // Small delay to ensure sheet dismissal before opening next one
+            try await Task.sleep(for: .milliseconds(200))
+            
+            // Open top-up view
+            walletTopUpWallet = createdWallet
+            
+        case .cafe_wallet:
+            guard let cafeId = walletCreateCafeId else {
+                throw WalletServiceError.unknown("Cafe ID отсутствует")
+            }
+            
+            // Create Cafe Wallet
+            let createdWallet = try await realWalletStore.createCafeWallet(cafeId: cafeId, networkId: nil)
+            
+            // Close create step
+            showWalletCreateStep = false
+            
+            // Select the newly created wallet
+            realWalletStore.selectWallet(createdWallet)
+            
+            // Small delay to ensure sheet dismissal before opening next one
+            try await Task.sleep(for: .milliseconds(200))
+            
+            // Open top-up view
+            walletTopUpWallet = createdWallet
+        }
     }
 
     private func applyCafeSelection(cafe: CafeSummary, menu: CafeMenu, persistLastCafe: Bool) {
