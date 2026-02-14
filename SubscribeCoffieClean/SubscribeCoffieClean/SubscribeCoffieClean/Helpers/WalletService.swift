@@ -9,6 +9,28 @@ import Foundation
 import Combine
 import Auth
 
+// MARK: - Wallet Service Errors
+
+enum WalletServiceError: LocalizedError {
+    case authenticationRequired
+    case userNotFoundInDatabase
+    case networkError(Error)
+    case unknown(String)
+    
+    var errorDescription: String? {
+        switch self {
+        case .authenticationRequired:
+            return "Требуется авторизация. Пожалуйста, войдите снова."
+        case .userNotFoundInDatabase:
+            return "Пользователь не найден в базе данных. Требуется повторная авторизация."
+        case .networkError(let error):
+            return "Ошибка сети: \(error.localizedDescription)"
+        case .unknown(let message):
+            return message
+        }
+    }
+}
+
 @MainActor
 class WalletService: ObservableObject {
     private let apiClient: SupabaseAPIClient
@@ -65,22 +87,59 @@ class WalletService: ObservableObject {
     }
     
     /// Create a CityPass wallet
+    /// Note: userId parameter is kept for compatibility but server uses auth.uid() from JWT
     func createCityPassWallet(userId: UUID) async throws -> UUID {
-        let response: [String: AnyCodable] = try await apiClient.rpc(
-            "create_citypass_wallet",
-            params: ["p_user_id": userId.uuidString]
-        )
-        
-        // RPC returns UUID directly
-        if let walletIdStr = response["result"]?.value as? String,
-           let walletId = UUID(uuidString: walletIdStr) {
+        do {
+            // RPC returns UUID directly as a string
+            let response: String = try await apiClient.rpc(
+                "create_citypass_wallet",
+                params: ["p_user_id": userId.uuidString]
+            )
+            
+            // Parse UUID from string response
+            guard let walletId = UUID(uuidString: response) else {
+                throw NetworkError.decoding(NSError(
+                    domain: "WalletService",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not parse wallet ID from response: \(response)"]
+                ))
+            }
+            
             return walletId
+        } catch {
+            // Log the actual error for debugging
+            print("❌ [WalletService] createCityPassWallet error: \(error)")
+            print("❌ [WalletService] Error localized: \(error.localizedDescription)")
+            
+            // Handle specific authentication errors ONLY
+            let errorMessage = error.localizedDescription
+            
+            // Check for explicit authentication errors
+            if errorMessage.contains("Not authenticated") || errorMessage.contains("PGRST301") {
+                // PGRST301 = JWT expired or invalid
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.authenticationRequired
+            }
+            
+            // Check for user not found in database (after db reset)
+            if errorMessage.contains("User not found in auth.users") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+            
+            // Check for FK constraint violation (23503) - but only if it's about auth.users
+            if errorMessage.contains("23503") && errorMessage.contains("auth.users") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+            
+            // For all other errors, don't sign out - just pass them through
+            throw WalletServiceError.networkError(error)
         }
-        
-        throw NetworkError.decoding(NSError(domain: "WalletService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse wallet ID"]))
     }
     
     /// Create a Cafe Wallet
+    /// Note: userId parameter is kept for compatibility but server uses auth.uid() from JWT
     func createCafeWallet(userId: UUID, cafeId: UUID?, networkId: UUID?) async throws -> UUID {
         var params: [String: Any] = ["p_user_id": userId.uuidString]
         
@@ -91,17 +150,53 @@ class WalletService: ObservableObject {
             params["p_network_id"] = networkId.uuidString
         }
         
-        let response: [String: AnyCodable] = try await apiClient.rpc(
-            "create_cafe_wallet",
-            params: params
-        )
-        
-        if let walletIdStr = response["result"]?.value as? String,
-           let walletId = UUID(uuidString: walletIdStr) {
+        do {
+            // RPC returns UUID directly as a string
+            let response: String = try await apiClient.rpc(
+                "create_cafe_wallet",
+                params: params
+            )
+            
+            // Parse UUID from string response
+            guard let walletId = UUID(uuidString: response) else {
+                throw NetworkError.decoding(NSError(
+                    domain: "WalletService",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not parse wallet ID from response: \(response)"]
+                ))
+            }
+            
             return walletId
+        } catch {
+            // Log the actual error for debugging
+            print("❌ [WalletService] createCafeWallet error: \(error)")
+            print("❌ [WalletService] Error localized: \(error.localizedDescription)")
+            
+            // Handle specific authentication errors ONLY
+            let errorMessage = error.localizedDescription
+            
+            // Check for explicit authentication errors
+            if errorMessage.contains("Not authenticated") || errorMessage.contains("PGRST301") {
+                // PGRST301 = JWT expired or invalid
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.authenticationRequired
+            }
+            
+            // Check for user not found in database (after db reset)
+            if errorMessage.contains("User not found in auth.users") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+            
+            // Check for FK constraint violation (23503) - but only if it's about auth.users
+            if errorMessage.contains("23503") && errorMessage.contains("auth.users") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+            
+            // For all other errors, don't sign out - just pass them through
+            throw WalletServiceError.networkError(error)
         }
-        
-        throw NetworkError.decoding(NSError(domain: "WalletService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse wallet ID"]))
     }
     
     /// Mock wallet top-up (simulates payment) - DEMO MODE ONLY

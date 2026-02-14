@@ -104,6 +104,20 @@ final class RealWalletStore: ObservableObject {
             }
             
             throw NetworkError.decoding(NSError(domain: "RealWalletStore", code: -1))
+        } catch let error as WalletServiceError {
+            await MainActor.run {
+                switch error {
+                case .authenticationRequired, .userNotFoundInDatabase:
+                    self.errorMessage = error.localizedDescription
+                    // Session already cleared by WalletService
+                case .networkError(let underlyingError):
+                    self.errorMessage = "Ошибка сети: \(underlyingError.localizedDescription)"
+                case .unknown(let message):
+                    self.errorMessage = message
+                }
+                self.isLoading = false
+            }
+            throw error
         } catch {
             await MainActor.run {
                 self.errorMessage = "Failed to create CityPass wallet: \(error.localizedDescription)"
@@ -136,6 +150,20 @@ final class RealWalletStore: ObservableObject {
             }
             
             throw NetworkError.decoding(NSError(domain: "RealWalletStore", code: -1))
+        } catch let error as WalletServiceError {
+            await MainActor.run {
+                switch error {
+                case .authenticationRequired, .userNotFoundInDatabase:
+                    self.errorMessage = error.localizedDescription
+                    // Session already cleared by WalletService
+                case .networkError(let underlyingError):
+                    self.errorMessage = "Ошибка сети: \(underlyingError.localizedDescription)"
+                case .unknown(let message):
+                    self.errorMessage = message
+                }
+                self.isLoading = false
+            }
+            throw error
         } catch {
             await MainActor.run {
                 self.errorMessage = "Failed to create Cafe wallet: \(error.localizedDescription)"

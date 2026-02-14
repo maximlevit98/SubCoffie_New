@@ -254,9 +254,9 @@ CREATE INDEX IF NOT EXISTS profiles_auth_provider_idx ON public.profiles(auth_pr
 CREATE OR REPLACE VIEW public.orders_with_user_info AS
 SELECT 
   o.*,
-  p.full_name as profile_full_name,
-  p.email as profile_email,
-  p.phone as profile_phone,
+  p.full_name as customer_name,
+  p.email as customer_email,
+  p.phone as customer_phone,
   p.avatar_url as customer_avatar,
   p.auth_provider as customer_auth_provider,
   p.created_at as customer_registered_at

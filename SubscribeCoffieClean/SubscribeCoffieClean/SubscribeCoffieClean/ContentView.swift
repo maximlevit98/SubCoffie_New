@@ -51,9 +51,9 @@ struct ContentView: View {
     // Stores
     @StateObject private var cart = CartStore()
     @StateObject private var orderStore = OrderStore()
-    @StateObject private var realWalletStore = RealWalletStore() // ✅ REAL Supabase wallets
-    @StateObject private var wallet = WalletStore() // ⚠️ DEPRECATED: Remove after migration
-    @StateObject private var cafeWallet = CafeWalletStore() // ⚠️ DEPRECATED: Remove after migration
+    @StateObject private var wallet = WalletStore()
+    @StateObject private var cafeWallet = CafeWalletStore()
+    @StateObject private var realWalletStore = RealWalletStore()
     @StateObject private var filterStore = FilterStore()
 
     @State private var lastRefundedOrderId: UUID? = nil
@@ -134,12 +134,7 @@ struct ContentView: View {
             break
 
         case .walletTopUp:
-            // Return to wallet choice if came from there, otherwise to map
-            if realWalletStore.hasWallets {
-                currentScreen = .map
-            } else {
-                currentScreen = .walletChoice
-            }
+            currentScreen = .walletChoice
 
         case .onboarding:
             break
@@ -195,7 +190,12 @@ struct ContentView: View {
                 case .walletChoice:
                     WalletChoiceView(
                         onCityPassSelected: {
-                            startCityPassTopUp(isSetupFlow: true, showAsScreen: true)
+                            pendingWalletType = .citypass
+                            pendingWalletScopeId = nil
+                            pendingWalletScopeName = nil
+                            walletTopUpType = .citypass
+                            walletTopUpScopeTitle = "CityPass"
+                            isWalletTopUpPresented = true
                         },
                         onCityPassCafes: {
                             isCityPassCafesPresented = true
@@ -209,32 +209,19 @@ struct ContentView: View {
                     )
 
                 case .walletTopUp:
-                    // Use real wallet from RealWalletStore
-                    if let wallet = realWalletStore.selectedWallet {
-                        WalletTopUpView(wallet: wallet, onTopUpSuccess: {
-                            Task {
-                                await realWalletStore.refreshWallets()
-                                await MainActor.run {
-                                    if pendingWalletType != nil {
-                                        proceedAfterWalletSetup()
-                                    } else {
-                                        // Navigate to map after top-up
-                                        currentScreen = .map
-                                    }
-                                }
-                            }
-                        })
-                    } else {
-                        // Fallback: show loading or error
-                        VStack(spacing: 16) {
-                            Text("Кошелёк не выбран")
-                                .font(.headline)
-                            Button("Вернуться") {
-                                currentScreen = .walletChoice
-                            }
-                        }
-                        .padding()
-                    }
+                    // Temporary: Create a mock Wallet from WalletStore data
+                    let tempWallet = Wallet(
+                        id: UUID(),
+                        walletType: .citypass,
+                        balanceCredits: wallet.credits,
+                        lifetimeTopUpCredits: wallet.lifetimeTopUp,
+                        cafeId: nil,
+                        cafeName: nil,
+                        networkId: nil,
+                        networkName: nil,
+                        createdAt: Date()
+                    )
+                    WalletTopUpView(wallet: tempWallet)
 
                 case .onboarding:
                     OnboardingView {
@@ -305,8 +292,7 @@ struct ContentView: View {
                         CheckoutView(
                             isPresented: .constant(true),
                             cart: cart,
-                            wallet: wallet,  // ⚠️ DEPRECATED: kept for backward compat
-                            realWalletStore: realWalletStore,  // ✅ NEW: Real wallet store
+                            wallet: wallet,
                             selectedCafe: cafe,
                             onOrderSuccess: { orderId in
                                 lastCreatedOrderId = orderId
@@ -373,37 +359,25 @@ struct ContentView: View {
         .sheet(isPresented: $isWalletTopUpPresented, onDismiss: {
             handleWalletTopUpDismiss()
         }) {
-            // Use real wallet from RealWalletStore
-            if let wallet = realWalletStore.selectedWallet {
-                WalletTopUpView(wallet: wallet, onTopUpSuccess: {
-                    Task {
-                        await realWalletStore.refreshWallets()
-                        if pendingWalletType != nil {
-                            await MainActor.run {
-                                proceedAfterWalletSetup()
-                            }
-                        }
-                    }
-                })
-            } else {
-                // Fallback
-                VStack(spacing: 16) {
-                    Text("Кошелёк не выбран")
-                        .font(.headline)
-                    Button("Закрыть") {
-                        isWalletTopUpPresented = false
-                    }
-                }
-                .padding()
-            }
+            let tempWallet = Wallet(
+                id: UUID(),
+                walletType: .citypass,
+                balanceCredits: wallet.credits,
+                lifetimeTopUpCredits: wallet.lifetimeTopUp,
+                cafeId: nil,
+                cafeName: nil,
+                networkId: nil,
+                networkName: nil,
+                createdAt: Date()
+            )
+            WalletTopUpView(wallet: tempWallet)
         }
         .sheet(isPresented: $isWalletDemoPresented) {
             WalletChoiceView(
                 onCityPassSelected: {
-                    isWalletDemoPresented = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        startCityPassTopUp(isSetupFlow: false, showAsScreen: false)
-                    }
+                    walletTopUpType = .citypass
+                    walletTopUpScopeTitle = "CityPass"
+                    isWalletTopUpPresented = true
                 },
                 onCityPassCafes: {
                     isCityPassCafesPresented = true
@@ -520,9 +494,6 @@ struct ContentView: View {
 
     private func routeAfterAuth() {
         Task {
-            // Load real wallets after auth
-            await realWalletStore.loadWallets()
-            
             let screen = await determineStartScreen()
             await MainActor.run { currentScreen = screen }
         }
@@ -531,27 +502,12 @@ struct ContentView: View {
     private func determineStartScreen() async -> AppScreen {
         if !authService.isAuthenticated { return .login }
 
-        // If no wallets loaded yet, go to wallet choice
-        if !realWalletStore.hasWallets {
-            return .walletChoice
-        }
-        
-        // If have wallets but none selected, auto-select
-        if realWalletStore.selectedWallet == nil {
-            if let cityPass = realWalletStore.cityPassWallet {
-                realWalletStore.selectWallet(cityPass)
-            } else if let firstWallet = realWalletStore.wallets.first {
-                realWalletStore.selectWallet(firstWallet)
-            }
+        // если default wallet kind не задан — старое поведение
+        if defaultWalletKind.isEmpty {
+            return .map
         }
 
-        // Use selected wallet to determine start screen
-        guard let selectedWallet = realWalletStore.selectedWallet else {
-            return .walletChoice
-        }
-        
-        // CityPass: restore last cafe if available
-        if selectedWallet.walletType == .citypass {
+        if defaultWalletKind == WalletType.citypass.rawValue {
             if let cafe = cafeById(lastCafeId) {
                 let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
                 await MainActor.run {
@@ -562,10 +518,10 @@ struct ContentView: View {
             }
             return .map
         }
-        
-        // Cafe Wallet: go directly to bound cafe
-        if selectedWallet.walletType == .cafe_wallet, let cafeId = selectedWallet.cafeId {
-            if let cafe = cafeById(cafeId.uuidString) {
+
+        if defaultWalletKind == WalletType.cafe_wallet.rawValue {
+            let boundId = !cafeWalletCafeId.isEmpty ? cafeWalletCafeId : (cafeWallet.cafeId ?? "")
+            if let cafe = cafeById(boundId) {
                 let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
                 await MainActor.run {
                     menuSchemaUnavailable = result.schemaMissing
@@ -573,20 +529,15 @@ struct ContentView: View {
                 }
                 return .cafe
             }
-            // Cafe not found, go to selection
+            // привязки нет — отправляем на выбор
             return .walletChoice
         }
 
-        return .map
+        return walletType.isEmpty ? .walletChoice : .map
     }
 
     private func bootstrap() async {
         await fetchCafesIfNeeded(force: true)
-        
-        // Load real wallets from Supabase
-        if authService.isAuthenticated {
-            await realWalletStore.loadWallets()
-        }
 
         let screen = await determineStartScreen()
         await MainActor.run {
@@ -635,30 +586,15 @@ struct ContentView: View {
 
     private func handleCafeWalletSelection(_ cafe: CafeSummary) async {
         await MainActor.run { isMenuLoading = true }
-        
-        // Create or select Cafe Wallet for this cafe
-        do {
-            if let existingWallet = realWalletStore.cafeWallet(forCafe: cafe.id) {
-                // Wallet already exists, select it
-                realWalletStore.selectWallet(existingWallet)
-                AppLogger.debug("✅ Selected existing Cafe Wallet for cafe: \(cafe.name)")
-            } else {
-                // Create new Cafe Wallet for this cafe
-                let newWallet = try await realWalletStore.createCafeWallet(cafeId: cafe.id, networkId: nil)
-                AppLogger.debug("✅ Created Cafe Wallet for cafe: \(cafe.name)")
-            }
-            
-            // Navigate to top-up screen
-            await MainActor.run {
-                isMenuLoading = false
-                currentScreen = .walletTopUp
-            }
-        } catch {
-            await MainActor.run {
-                AppLogger.debug("❌ Failed to create Cafe Wallet: \(error)")
-                isMenuLoading = false
-                // Stay on cafe selection screen on error
-            }
+        let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
+        await MainActor.run {
+            cafeWalletCafeId = cafe.id.uuidString
+            cafeWalletCafeName = cafe.name
+            cafeWallet.selectCafe(cafe)
+            menuSchemaUnavailable = result.schemaMissing
+            applyCafeSelection(cafe: cafe, menu: result.menu, persistLastCafe: true)
+            isMenuLoading = false
+            currentScreen = .cafe
         }
     }
 
@@ -672,42 +608,6 @@ struct ContentView: View {
         }
     }
 
-    private func startCityPassTopUp(isSetupFlow: Bool, showAsScreen: Bool) {
-        Task {
-            do {
-                if let existingCityPass = realWalletStore.cityPassWallet {
-                    realWalletStore.selectWallet(existingCityPass)
-                    AppLogger.debug("✅ Selected existing CityPass wallet")
-                } else {
-                    await MainActor.run { isLoading = true }
-                    _ = try await realWalletStore.createCityPassWallet()
-                    AppLogger.debug("✅ Created new CityPass wallet")
-                }
-                
-                if isSetupFlow {
-                    pendingWalletType = .citypass
-                    pendingWalletScopeId = nil
-                    pendingWalletScopeName = nil
-                }
-                
-                walletTopUpType = .citypass
-                walletTopUpScopeTitle = "CityPass"
-                
-                await MainActor.run {
-                    isLoading = false
-                    if showAsScreen {
-                        currentScreen = .walletTopUp
-                    } else {
-                        isWalletTopUpPresented = true
-                    }
-                }
-            } catch {
-                AppLogger.debug("❌ Failed to create/select CityPass: \(error)")
-                await MainActor.run { isLoading = false }
-            }
-        }
-    }
-
     private func logout() {
         Task {
             try? await authService.signOut()
@@ -718,10 +618,6 @@ struct ContentView: View {
         defaultWalletKind = ""
         lastCafeId = ""
         lastCafeName = ""
-        
-        // Clear real wallet store
-        realWalletStore.clearSelection()
-        
         // Не сбрасываем walletType и walletScopeId при выходе
         currentScreen = .login
     }

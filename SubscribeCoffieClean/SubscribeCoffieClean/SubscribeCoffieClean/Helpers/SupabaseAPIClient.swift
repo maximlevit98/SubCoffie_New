@@ -7,14 +7,17 @@ struct SupabaseAPIClient {
     let baseURL: URL
     private let anonKey: String
     private let session: URLSession
+    private let supabaseClient: SupabaseClient
 
     init(
         baseURL: URL = SupabaseConfig.restBaseURL,
         anonKey: String = SupabaseConfig.anonKey,
-        session: URLSession? = nil
+        session: URLSession? = nil,
+        supabaseClient: SupabaseClient = SupabaseClientProvider.client
     ) {
         self.baseURL = baseURL
         self.anonKey = anonKey
+        self.supabaseClient = supabaseClient
         if let session {
             self.session = session
         } else {
@@ -22,6 +25,32 @@ struct SupabaseAPIClient {
             config.timeoutIntervalForRequest = SupabaseConfig.requestTimeout
             config.timeoutIntervalForResource = SupabaseConfig.requestTimeout
             self.session = URLSession(configuration: config)
+        }
+    }
+    
+    // MARK: - Private Helpers
+    
+    /// Get current access token from Supabase session
+    private func getAccessToken() async -> String? {
+        do {
+            let session = try await supabaseClient.auth.session
+            return session.accessToken
+        } catch {
+            AppLogger.debug("⚠️ No active session, using anon key only")
+            return nil
+        }
+    }
+    
+    /// Add authorization headers to request (with user JWT if available)
+    private func addAuthHeaders(to request: inout URLRequest, accessToken: String?) {
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+        
+        if let token = accessToken {
+            // Use user's JWT token for authenticated requests
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            // Fallback to anon key
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
         }
     }
 
@@ -36,8 +65,10 @@ struct SupabaseAPIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        
+        // Add auth headers with JWT token
+        let accessToken = await getAccessToken()
+        addAuthHeaders(to: &request, accessToken: accessToken)
 
         AppLogger.debug("GET \(url.absoluteString)")
 
@@ -108,8 +139,10 @@ struct SupabaseAPIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
-        request.setValue(anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        
+        // Add auth headers with JWT token
+        let accessToken = await getAccessToken()
+        addAuthHeaders(to: &request, accessToken: accessToken)
 
         AppLogger.debug("DELETE \(url.absoluteString)")
 
@@ -140,14 +173,16 @@ struct SupabaseAPIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        
+        // Add auth headers with JWT token
+        let accessToken = await getAccessToken()
+        addAuthHeaders(to: &request, accessToken: accessToken)
         
         if !params.isEmpty {
             request.httpBody = try JSONSerialization.data(withJSONObject: params)
         }
         
-        AppLogger.debug("RPC \(functionName) with params: \(params)")
+        AppLogger.debug("[Supabase] RPC \(functionName) with params: \(params)")
         
         let (data, response): (Data, URLResponse)
         do {
@@ -161,7 +196,7 @@ struct SupabaseAPIClient {
         }
         
         let bodyString = String(data: data, encoding: .utf8)
-        AppLogger.debugResponse(url: rpcURL, statusCode: http.statusCode, body: bodyString)
+        AppLogger.debug("[Supabase] url=\(rpcURL) status=\(http.statusCode) body=\(bodyString ?? "nil")")
         
         guard (200..<300).contains(http.statusCode) else {
             throw NetworkError.httpStatus(http.statusCode, body: bodyString)
@@ -193,8 +228,10 @@ struct SupabaseAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
-        request.setValue(anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        
+        // Add auth headers with JWT token
+        let accessToken = await getAccessToken()
+        addAuthHeaders(to: &request, accessToken: accessToken)
 
         AppLogger.debug("\(method) \(url.absoluteString)")
 

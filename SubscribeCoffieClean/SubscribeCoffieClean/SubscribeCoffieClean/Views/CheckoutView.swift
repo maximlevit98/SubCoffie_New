@@ -10,8 +10,7 @@ import SwiftUI
 struct CheckoutView: View {
     @Binding var isPresented: Bool
     let cart: CartStore
-    let wallet: WalletStore  // ⚠️ DEPRECATED: Use realWalletStore instead
-    let realWalletStore: RealWalletStore?  // ✅ NEW: Real wallet store
+    let wallet: WalletStore
     let selectedCafe: CafeSummary?
     let onOrderSuccess: (UUID) -> Void
     
@@ -141,15 +140,6 @@ struct CheckoutView: View {
                 let customerName = authService.userProfile?.fullName ?? "Unknown User"
                 let customerPhone = authService.userProfile?.phone ?? ""
                 
-                // ✅ Get wallet_id from RealWalletStore
-                guard let walletId = realWalletStore?.selectedWallet?.id else {
-                    throw OrderServiceError.walletIdRequired
-                }
-                
-                #if DEBUG
-                print("💳 [CheckoutView] Using wallet: \(walletId)")
-                #endif
-                
                 let result = try await OrderService.shared.createOrder(
                     cafeId: cafe.id,
                     orderType: "now",
@@ -157,41 +147,21 @@ struct CheckoutView: View {
                     customerPhone: customerPhone,
                     customerNotes: nil,
                     paymentMethod: "wallet",
-                    walletId: walletId,  // ✅ NEW: Pass wallet_id
                     items: items
                 )
                 
                 #if DEBUG
                 print("✅ [CheckoutView] Order created successfully: \(result.orderId)")
                 print("✅ [CheckoutView] Order number: \(result.orderNumber)")
-                if let balanceAfter = result.walletBalanceAfter {
-                    print("💰 [CheckoutView] Wallet balance after: \(balanceAfter) credits")
-                }
                 #endif
                 
                 await MainActor.run {
-                    // Refresh wallets to update balance
-                    Task {
-                        await realWalletStore?.refreshWallets()
-                    }
                     onOrderSuccess(result.orderId)
                     isPresented = false
                     isProcessing = false
                 }
                 
-            } catch let error as OrderServiceError {
-                // Handle specific order service errors
-                #if DEBUG
-                print("❌ [CheckoutView] Order error: \(error.localizedDescription)")
-                #endif
-                
-                await MainActor.run {
-                    isProcessing = false
-                    errorMessage = error.localizedDescription
-                    showError = true
-                }
             } catch {
-                // Handle generic errors
                 #if DEBUG
                 print("❌ [CheckoutView] Failed to create order: \(error)")
                 #endif

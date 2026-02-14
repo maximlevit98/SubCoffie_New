@@ -82,7 +82,8 @@ $$;
 alter table public.wallets
   add column if not exists wallet_type wallet_type default 'citypass',
   add column if not exists cafe_id uuid references public.cafes(id) on delete set null,
-  add column if not exists network_id uuid references public.wallet_networks(id) on delete set null;
+  add column if not exists network_id uuid references public.wallet_networks(id) on delete set null,
+  add column if not exists created_at timestamp with time zone default now();
 
 -- Add constraint: cafe_wallet must have cafe_id OR network_id
 alter table public.wallets
@@ -264,7 +265,9 @@ begin
 end;
 $$;
 
--- Function: create_citypass_wallet
+-- Function: create_citypass_wallet (IDEMPOTENT)
+-- SECURITY: Uses auth.uid() from JWT, ignores p_user_id parameter for security
+-- IDEMPOTENT: Returns existing wallet ID if already exists, creates new one otherwise
 create or replace function public.create_citypass_wallet(p_user_id uuid)
 returns uuid
 language plpgsql
@@ -272,26 +275,42 @@ security definer
 as $$
 declare
   v_wallet_id uuid;
+  v_authenticated_user_id uuid;
 begin
-  -- Check if user already has a CityPass wallet
-  select id into v_wallet_id
-  from public.wallets
-  where user_id = p_user_id and wallet_type = 'citypass';
-
-  if v_wallet_id is not null then
-    raise exception 'User already has a CityPass wallet';
+  -- 🛡️ SECURITY: Get user_id from JWT token (not from parameter)
+  v_authenticated_user_id := auth.uid();
+  
+  if v_authenticated_user_id is null then
+    raise exception 'Not authenticated. Please sign in.';
   end if;
 
-  -- Create CityPass wallet
+  -- 🛡️ SECURITY: Verify user exists in auth.users
+  if not exists (select 1 from auth.users where id = v_authenticated_user_id) then
+    raise exception 'User not found in auth.users. Please re-authenticate.';
+  end if;
+
+  -- 🔄 IDEMPOTENT: Check if user already has a CityPass wallet
+  select id into v_wallet_id
+  from public.wallets
+  where user_id = v_authenticated_user_id and wallet_type = 'citypass';
+
+  if v_wallet_id is not null then
+    -- Wallet already exists, return its ID
+    return v_wallet_id;
+  end if;
+
+  -- Create new CityPass wallet
   insert into public.wallets (user_id, wallet_type, balance_credits, lifetime_top_up_credits)
-  values (p_user_id, 'citypass', 0, 0)
+  values (v_authenticated_user_id, 'citypass', 0, 0)
   returning id into v_wallet_id;
 
   return v_wallet_id;
 end;
 $$;
 
--- Function: create_cafe_wallet
+-- Function: create_cafe_wallet (IDEMPOTENT)
+-- SECURITY: Uses auth.uid() from JWT, ignores p_user_id parameter for security
+-- IDEMPOTENT: Returns existing wallet ID if already exists for this cafe/network, creates new one otherwise
 create or replace function public.create_cafe_wallet(
   p_user_id uuid,
   p_cafe_id uuid default null,
@@ -303,7 +322,20 @@ security definer
 as $$
 declare
   v_wallet_id uuid;
+  v_authenticated_user_id uuid;
 begin
+  -- 🛡️ SECURITY: Get user_id from JWT token (not from parameter)
+  v_authenticated_user_id := auth.uid();
+  
+  if v_authenticated_user_id is null then
+    raise exception 'Not authenticated. Please sign in.';
+  end if;
+
+  -- 🛡️ SECURITY: Verify user exists in auth.users
+  if not exists (select 1 from auth.users where id = v_authenticated_user_id) then
+    raise exception 'User not found in auth.users. Please re-authenticate.';
+  end if;
+
   -- Validate: must provide either cafe_id or network_id
   if p_cafe_id is null and p_network_id is null then
     raise exception 'Must provide either cafe_id or network_id';
@@ -313,10 +345,10 @@ begin
     raise exception 'Cannot provide both cafe_id and network_id';
   end if;
 
-  -- Check if user already has a wallet for this cafe/network
+  -- 🔄 IDEMPOTENT: Check if user already has a wallet for this cafe/network
   select id into v_wallet_id
   from public.wallets
-  where user_id = p_user_id
+  where user_id = v_authenticated_user_id
     and wallet_type = 'cafe_wallet'
     and (
       (p_cafe_id is not null and cafe_id = p_cafe_id) or
@@ -324,12 +356,13 @@ begin
     );
 
   if v_wallet_id is not null then
-    raise exception 'User already has a Cafe Wallet for this cafe/network';
+    -- Wallet already exists, return its ID
+    return v_wallet_id;
   end if;
 
-  -- Create Cafe Wallet
+  -- Create new Cafe Wallet
   insert into public.wallets (user_id, wallet_type, cafe_id, network_id, balance_credits, lifetime_top_up_credits)
-  values (p_user_id, 'cafe_wallet', p_cafe_id, p_network_id, 0, 0)
+  values (v_authenticated_user_id, 'cafe_wallet', p_cafe_id, p_network_id, 0, 0)
   returning id into v_wallet_id;
 
   return v_wallet_id;
@@ -437,8 +470,8 @@ create index if not exists wallets_network_id_idx on public.wallets(network_id) 
 -- ============================================================================
 
 comment on function public.calculate_commission is 'Calculates commission for an operation based on config';
-comment on function public.create_citypass_wallet is 'Creates a universal CityPass wallet for user';
-comment on function public.create_cafe_wallet is 'Creates a Cafe Wallet tied to specific cafe or network';
+comment on function public.create_citypass_wallet is 'IDEMPOTENT: Creates or returns existing CityPass wallet for user. SECURITY: Uses auth.uid() from JWT, ignores p_user_id parameter.';
+comment on function public.create_cafe_wallet is 'IDEMPOTENT: Creates or returns existing Cafe Wallet for specific cafe/network. SECURITY: Uses auth.uid() from JWT, ignores p_user_id parameter.';
 comment on function public.validate_wallet_for_order is 'Validates if wallet can be used for order at this cafe';
 comment on function public.get_user_wallets is 'Returns all wallets for user with details';
 
