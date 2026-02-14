@@ -6,45 +6,77 @@
 
 -- ============================================================================
 -- 1) Deduplicate historical data (keep oldest wallet per uniqueness scope)
+--    Repoint dependent rows before delete to avoid FK failures.
 -- ============================================================================
 
-WITH ranked AS (
+CREATE TEMP TABLE _wallet_dedupe_map (
+  duplicate_wallet_id uuid PRIMARY KEY,
+  canonical_wallet_id uuid NOT NULL
+) ON COMMIT DROP;
+
+-- CityPass duplicates: one wallet per user.
+INSERT INTO _wallet_dedupe_map (duplicate_wallet_id, canonical_wallet_id)
+SELECT ranked.id, ranked.canonical_id
+FROM (
   SELECT
     id,
+    FIRST_VALUE(id) OVER (PARTITION BY user_id ORDER BY created_at ASC, id ASC) AS canonical_id,
     ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at ASC, id ASC) AS rn
   FROM public.wallets
   WHERE wallet_type = 'citypass'
-)
-DELETE FROM public.wallets w
-USING ranked r
-WHERE w.id = r.id
-  AND r.rn > 1;
+) ranked
+WHERE ranked.rn > 1
+ON CONFLICT (duplicate_wallet_id) DO NOTHING;
 
-WITH ranked AS (
+-- Cafe wallet duplicates by cafe scope: one wallet per user+cafe.
+INSERT INTO _wallet_dedupe_map (duplicate_wallet_id, canonical_wallet_id)
+SELECT ranked.id, ranked.canonical_id
+FROM (
   SELECT
     id,
+    FIRST_VALUE(id) OVER (PARTITION BY user_id, cafe_id ORDER BY created_at ASC, id ASC) AS canonical_id,
     ROW_NUMBER() OVER (PARTITION BY user_id, cafe_id ORDER BY created_at ASC, id ASC) AS rn
   FROM public.wallets
   WHERE wallet_type = 'cafe_wallet'
     AND cafe_id IS NOT NULL
-)
-DELETE FROM public.wallets w
-USING ranked r
-WHERE w.id = r.id
-  AND r.rn > 1;
+) ranked
+WHERE ranked.rn > 1
+ON CONFLICT (duplicate_wallet_id) DO NOTHING;
 
-WITH ranked AS (
+-- Cafe wallet duplicates by network scope: one wallet per user+network.
+INSERT INTO _wallet_dedupe_map (duplicate_wallet_id, canonical_wallet_id)
+SELECT ranked.id, ranked.canonical_id
+FROM (
   SELECT
     id,
+    FIRST_VALUE(id) OVER (PARTITION BY user_id, network_id ORDER BY created_at ASC, id ASC) AS canonical_id,
     ROW_NUMBER() OVER (PARTITION BY user_id, network_id ORDER BY created_at ASC, id ASC) AS rn
   FROM public.wallets
   WHERE wallet_type = 'cafe_wallet'
     AND network_id IS NOT NULL
-)
+) ranked
+WHERE ranked.rn > 1
+ON CONFLICT (duplicate_wallet_id) DO NOTHING;
+
+-- Repoint FK references before deleting duplicate wallets.
+UPDATE public.orders_core o
+SET wallet_id = m.canonical_wallet_id
+FROM _wallet_dedupe_map m
+WHERE o.wallet_id = m.duplicate_wallet_id;
+
+UPDATE public.wallet_transactions wt
+SET wallet_id = m.canonical_wallet_id
+FROM _wallet_dedupe_map m
+WHERE wt.wallet_id = m.duplicate_wallet_id;
+
+UPDATE public.payment_transactions pt
+SET wallet_id = m.canonical_wallet_id
+FROM _wallet_dedupe_map m
+WHERE pt.wallet_id = m.duplicate_wallet_id;
+
 DELETE FROM public.wallets w
-USING ranked r
-WHERE w.id = r.id
-  AND r.rn > 1;
+USING _wallet_dedupe_map m
+WHERE w.id = m.duplicate_wallet_id;
 
 -- ============================================================================
 -- 2) Unique indexes to prevent future duplicates
