@@ -96,14 +96,41 @@ export default async function WalletDetailsPage({
       </div>
 
       {/* Add Transaction Form */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-6">
-        <h3 className="text-lg font-semibold mb-2">
-          Начислить или списать средства
-        </h3>
-        <p className="text-sm text-zinc-500 mb-4">
-          ⚠️ Функция временно недоступна (RPC deprecated). Требуется новая реализация.
-        </p>
-        {/* <AddTransactionForm userId={params.userId} /> */}
+      <div className="rounded-lg border-2 border-amber-200 bg-amber-50 p-6">
+        <div className="flex items-start gap-4">
+          <div className="flex-shrink-0 w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+            <span className="text-2xl">⚠️</span>
+          </div>
+          <div className="flex-1">
+            <h3 className="text-lg font-semibold text-amber-900 mb-2">
+              Ручные операции временно недоступны
+            </h3>
+            <div className="space-y-2 text-sm text-amber-800">
+              <p>
+                <strong>Причина:</strong> RPC функция <code className="bg-amber-200 px-1 py-0.5 rounded text-xs">add_wallet_transaction</code> была удалена в ходе миграции на каноническую схему (20260205000003_unify_wallets_schema.sql).
+              </p>
+              <p>
+                <strong>Решение:</strong> Backend-агент может добавить новую безопасную RPC функцию для админ-операций с учётом множественных кошельков (citypass + cafe_wallet).
+              </p>
+              <div className="mt-4 p-3 bg-white rounded border border-amber-300">
+                <p className="text-xs font-medium text-amber-900 mb-2">
+                  Требуемая функциональность:
+                </p>
+                <ul className="text-xs text-amber-700 space-y-1 list-disc list-inside">
+                  <li>Начисление/списание на конкретный кошелёк (wallet_id)</li>
+                  <li>Создание транзакции с типом admin_credit/admin_debit</li>
+                  <li>Обновление balance_credits с проверкой достаточности средств</li>
+                  <li>Логирование операций админа</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        {/* Placeholder form (disabled) */}
+        <div className="mt-6 opacity-50 pointer-events-none">
+          <AddTransactionForm userId={params.userId} />
+        </div>
       </div>
 
       {/* Transactions History */}

@@ -1,11 +1,23 @@
 import Link from "next/link";
 
 import { listWallets, getWalletsStats } from "../../../lib/supabase/queries/wallets";
+import { WalletsFilters } from "./WalletsFilters";
+import { WalletStatsCards } from "./WalletStatsCards";
 
-export default async function WalletsPage() {
+type WalletsPageProps = {
+  searchParams: {
+    type?: string;
+    search?: string;
+  };
+};
+
+export default async function WalletsPage({ searchParams }: WalletsPageProps) {
   let wallets: any[] = [];
   let stats: any = null;
   let error: string | null = null;
+  
+  const filterType = searchParams.type;
+  const searchQuery = searchParams.search?.toLowerCase() || "";
 
   try {
     [{ data: wallets, error: error }, { data: stats }] = await Promise.all([
@@ -30,11 +42,16 @@ export default async function WalletsPage() {
     );
   }
 
-  // Group wallets by user
+  // Group wallets by user and apply filters
   const userWalletsMap = new Map<string, any[]>();
   const userProfilesMap = new Map<string, any>();
   
   (wallets || []).forEach((wallet: any) => {
+    // Apply wallet type filter
+    if (filterType && wallet.wallet_type !== filterType) {
+      return;
+    }
+    
     if (!userWalletsMap.has(wallet.user_id)) {
       userWalletsMap.set(wallet.user_id, []);
       userProfilesMap.set(wallet.user_id, wallet.profiles);
@@ -42,13 +59,38 @@ export default async function WalletsPage() {
     userWalletsMap.get(wallet.user_id)!.push(wallet);
   });
 
-  const usersWithWallets = Array.from(userWalletsMap.entries()).map(([userId, wallets]) => ({
+  let usersWithWallets = Array.from(userWalletsMap.entries()).map(([userId, wallets]) => ({
     userId,
     profile: userProfilesMap.get(userId),
     wallets,
     totalBalance: wallets.reduce((sum, w) => sum + (w.balance_credits || 0), 0),
     totalLifetime: wallets.reduce((sum, w) => sum + (w.lifetime_top_up_credits || 0), 0),
   }));
+  
+  // Apply search filter
+  if (searchQuery) {
+    usersWithWallets = usersWithWallets.filter((user) => {
+      const fullName = user.profile?.full_name?.toLowerCase() || "";
+      const phone = user.profile?.phone?.toLowerCase() || "";
+      return fullName.includes(searchQuery) || phone.includes(searchQuery);
+    });
+  }
+  
+  // Calculate filtered stats
+  const filteredWallets = usersWithWallets.flatMap((u) => u.wallets);
+  const filteredStats = {
+    total_users: usersWithWallets.length,
+    total_wallets: filteredWallets.length,
+    total_balance: filteredWallets.reduce((sum, w) => sum + (w.balance_credits || 0), 0),
+    citypass_count: filteredWallets.filter(w => w.wallet_type === "citypass").length,
+    cafe_wallet_count: filteredWallets.filter(w => w.wallet_type === "cafe_wallet").length,
+    citypass_balance: filteredWallets
+      .filter(w => w.wallet_type === "citypass")
+      .reduce((sum, w) => sum + (w.balance_credits || 0), 0),
+    cafe_wallet_balance: filteredWallets
+      .filter(w => w.wallet_type === "cafe_wallet")
+      .reduce((sum, w) => sum + (w.balance_credits || 0), 0),
+  };
 
   return (
     <section className="space-y-6">
@@ -59,38 +101,61 @@ export default async function WalletsPage() {
           <span className="text-sm text-emerald-600">Supabase: OK</span>
         </div>
 
-        {/* Stats */}
+        {/* Global Stats (all data) */}
         {stats && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <div className="rounded-lg border border-zinc-200 bg-white p-4">
-              <p className="text-sm text-zinc-500">Всего кошельков</p>
-              <p className="text-2xl font-semibold mt-1">
-                {stats.total_wallets || 0}
-              </p>
-              <p className="text-xs text-zinc-400 mt-1">
-                CityPass: {stats.citypass_count || 0} | Cafe: {stats.cafe_wallet_count || 0}
-              </p>
+          <WalletStatsCards stats={stats} />
+        )}
+
+        {/* Filters */}
+        <WalletsFilters 
+          currentType={filterType}
+          currentSearch={searchQuery}
+          totalResults={usersWithWallets.length}
+        />
+        
+        {/* Filtered Stats */}
+        {(filterType || searchQuery) && (
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-sm font-medium text-amber-800">
+                📊 Результаты фильтрации
+              </span>
+              {filterType && (
+                <span className="inline-block px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded">
+                  {filterType === "citypass" ? "CityPass" : "Cafe Wallet"}
+                </span>
+              )}
+              {searchQuery && (
+                <span className="inline-block px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded">
+                  Поиск: "{searchQuery}"
+                </span>
+              )}
             </div>
-            <div className="rounded-lg border border-zinc-200 bg-white p-4">
-              <p className="text-sm text-zinc-500">Пользователей</p>
-              <p className="text-2xl font-semibold mt-1">
-                {usersWithWallets.length}
-              </p>
-              <p className="text-xs text-zinc-400 mt-1">
-                Средн. {usersWithWallets.length > 0 ? (stats.total_wallets / usersWithWallets.length).toFixed(1) : 0} кош./польз.
-              </p>
-            </div>
-            <div className="rounded-lg border border-zinc-200 bg-white p-4">
-              <p className="text-sm text-zinc-500">Общий баланс</p>
-              <p className="text-2xl font-semibold mt-1">
-                {Math.round(stats.total_balance || 0)} кр.
-              </p>
-            </div>
-            <div className="rounded-lg border border-zinc-200 bg-white p-4">
-              <p className="text-sm text-zinc-500">Средний баланс</p>
-              <p className="text-2xl font-semibold mt-1">
-                {Math.round(stats.avg_balance || 0)} кр.
-              </p>
+            <div className="grid grid-cols-4 gap-4 text-sm">
+              <div>
+                <span className="text-amber-600">Пользователей:</span>
+                <span className="ml-2 font-semibold text-amber-900">
+                  {filteredStats.total_users}
+                </span>
+              </div>
+              <div>
+                <span className="text-amber-600">Кошельков:</span>
+                <span className="ml-2 font-semibold text-amber-900">
+                  {filteredStats.total_wallets}
+                </span>
+              </div>
+              <div>
+                <span className="text-amber-600">Общий баланс:</span>
+                <span className="ml-2 font-semibold text-amber-900">
+                  {Math.round(filteredStats.total_balance)} кр.
+                </span>
+              </div>
+              <div>
+                <span className="text-amber-600">CP / Cafe:</span>
+                <span className="ml-2 font-semibold text-amber-900">
+                  {filteredStats.citypass_count} / {filteredStats.cafe_wallet_count}
+                </span>
+              </div>
             </div>
           </div>
         )}
