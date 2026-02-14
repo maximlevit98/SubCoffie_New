@@ -474,21 +474,21 @@ struct WalletTopUpView: View {
             if let existing = wallets.first(where: { $0.walletType == .citypass }) {
                 return existing.id
             }
-            return try await walletService.createCityPassWallet(userId: userId)
+            throw WalletServiceError.unknown("Кошелёк не найден. Сначала создайте CityPass кошелёк.")
             
         case .cafe_wallet:
             if let byCafe = wallet.cafeId {
                 if let existing = wallets.first(where: { $0.walletType == .cafe_wallet && $0.cafeId == byCafe }) {
                     return existing.id
                 }
-                return try await walletService.createCafeWallet(userId: userId, cafeId: byCafe, networkId: nil)
+                throw WalletServiceError.unknown("Кошелёк кофейни не найден. Сначала создайте кошелёк для этой кофейни.")
             }
             
             if let byNetwork = wallet.networkId {
                 if let existing = wallets.first(where: { $0.walletType == .cafe_wallet && $0.networkId == byNetwork }) {
                     return existing.id
                 }
-                return try await walletService.createCafeWallet(userId: userId, cafeId: nil, networkId: byNetwork)
+                throw WalletServiceError.unknown("Кошелёк сети не найден. Сначала создайте кошелёк для этой сети.")
             }
             
             throw WalletServiceError.unknown("Кошелёк кофейни не привязан к кафе или сети")

@@ -584,11 +584,8 @@ struct ContentView: View {
         await realWalletStore.loadWallets()
 
         do {
-            let walletToTopUp: Wallet
-            if let existing = realWalletStore.cityPassWallet {
-                walletToTopUp = existing
-            } else {
-                walletToTopUp = try await realWalletStore.createCityPassWallet()
+            guard let walletToTopUp = realWalletStore.cityPassWallet else {
+                throw WalletServiceError.unknown("Сначала создайте CityPass кошелёк")
             }
 
             realWalletStore.selectWallet(walletToTopUp)
@@ -624,11 +621,8 @@ struct ContentView: View {
         await realWalletStore.loadWallets()
 
         do {
-            let walletToTopUp: Wallet
-            if let existing = realWalletStore.cafeWallet(forCafe: cafe.id) {
-                walletToTopUp = existing
-            } else {
-                walletToTopUp = try await realWalletStore.createCafeWallet(cafeId: cafe.id, networkId: nil)
+            guard let walletToTopUp = realWalletStore.cafeWallet(forCafe: cafe.id) else {
+                throw WalletServiceError.unknown("Сначала создайте кошелёк для кофейни \"\(cafe.name)\"")
             }
 
             realWalletStore.selectWallet(walletToTopUp)
