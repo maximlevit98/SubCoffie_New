@@ -31,6 +31,7 @@ final class RealWalletStore: ObservableObject {
     
     private let walletService: WalletService
     private let authService: AuthService
+    private var loadedUserId: UUID?
     
     // MARK: - Persistence (AppStorage keys for selected wallet)
     
@@ -56,8 +57,17 @@ final class RealWalletStore: ObservableObject {
             wallets = []
             selectedWallet = nil
             clearSelection()
+            loadedUserId = nil
             errorMessage = "User not authenticated"
             return
+        }
+        
+        // Important for multi-account sessions:
+        // do not keep previous user's wallets while a new user's data is loading.
+        if loadedUserId != userId {
+            wallets = []
+            selectedWallet = nil
+            clearSelection()
         }
         
         isLoading = true
@@ -69,6 +79,7 @@ final class RealWalletStore: ObservableObject {
             await MainActor.run {
                 self.wallets = loadedWallets
                 self.isLoading = false
+                self.loadedUserId = userId
                 
                 // Restore selected wallet from AppStorage
                 restoreSelectedWallet()
@@ -77,6 +88,13 @@ final class RealWalletStore: ObservableObject {
             }
         } catch {
             await MainActor.run {
+                // If this was a user switch and load failed, keep UI in "no wallets" state
+                // instead of showing a previous account's wallets.
+                if self.loadedUserId != userId {
+                    self.wallets = []
+                    self.selectedWallet = nil
+                    self.clearSelection()
+                }
                 self.errorMessage = "Failed to load wallets: \(error.localizedDescription)"
                 self.isLoading = false
                 AppLogger.debug("❌ Failed to load wallets: \(error)")
@@ -194,6 +212,16 @@ final class RealWalletStore: ObservableObject {
         legacySelectedWalletType = ""
         
         AppLogger.debug("🗑️ Cleared wallet selection")
+    }
+    
+    /// Reset all wallet state on logout/account switch.
+    func resetForSignOut() {
+        wallets = []
+        selectedWallet = nil
+        errorMessage = nil
+        isLoading = false
+        loadedUserId = nil
+        clearSelection()
     }
     
     /// Get CityPass wallet (or nil if not exists)

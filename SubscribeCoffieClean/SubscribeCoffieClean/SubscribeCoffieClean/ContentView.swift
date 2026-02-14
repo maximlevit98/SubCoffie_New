@@ -436,6 +436,8 @@ struct ContentView: View {
         .onChange(of: authService.isAuthenticated) { _, isAuth in
             if isAuth {
                 routeAfterAuth()
+            } else {
+                realWalletStore.resetForSignOut()
             }
         }
         .environmentObject(authService)
@@ -725,7 +727,7 @@ struct ContentView: View {
         }
         cart.reset()
         orderStore.reset()
-        realWalletStore.clearSelection()
+        realWalletStore.resetForSignOut()
         walletTopUpWallet = nil
         selectedCafe = nil
         defaultWalletKind = ""
