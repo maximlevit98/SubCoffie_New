@@ -184,6 +184,7 @@ struct ContentView: View {
 
                 case .walletChoice:
                     WalletChoiceView(
+                        hasCityPassWallet: realWalletStore.hasCityPass,
                         onCityPassSelected: {
                             Task {
                                 await startCityPassTopUpFlow()
@@ -353,6 +354,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isWalletDemoPresented) {
             WalletChoiceView(
+                hasCityPassWallet: realWalletStore.hasCityPass,
                 onCityPassSelected: {
                     isWalletDemoPresented = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {

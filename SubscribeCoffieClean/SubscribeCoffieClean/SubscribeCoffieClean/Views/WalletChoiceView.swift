@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct WalletChoiceView: View {
+    let hasCityPassWallet: Bool
     let onCityPassSelected: () -> Void
     let onCityPassCafes: () -> Void
     let onCafeWalletSelected: () -> Void
@@ -29,7 +30,7 @@ struct WalletChoiceView: View {
                     description: "Оплачивайте заказы в любой кофейне сети CityPass. Доступно более 50 кофеен в городе.",
                     icon: "creditcard.fill",
                     iconColor: .blue,
-                    primaryAction: "Пополнить",
+                    primaryAction: hasCityPassWallet ? "Пополнить" : "Создать кошелёк",
                     secondaryAction: "Кофейни в CityPass",
                     onPrimary: onCityPassSelected,
                     onSecondary: onCityPassCafes
@@ -132,6 +133,7 @@ private struct WalletTypeCard: View {
 
 #Preview {
     WalletChoiceView(
+        hasCityPassWallet: false,
         onCityPassSelected: {},
         onCityPassCafes: {},
         onCafeWalletSelected: {}
