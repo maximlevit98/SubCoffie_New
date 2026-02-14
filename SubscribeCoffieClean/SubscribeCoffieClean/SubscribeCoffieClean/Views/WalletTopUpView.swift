@@ -25,6 +25,7 @@ struct WalletTopUpView: View {
     var onTopUpSuccess: (() -> Void)? = nil // Callback to refresh wallets
     
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var authService: AuthService
     @StateObject private var walletService = WalletService()
     @State private var amountText: String = "500"
     @State private var isProcessing: Bool = false
@@ -418,9 +419,11 @@ struct WalletTopUpView: View {
         errorMessage = nil
         
         do {
+            let walletId = try await resolveWalletIdForTopUp()
+
             // Use mock payment (demo mode)
             let result = try await walletService.mockWalletTopup(
-                walletId: wallet.id,
+                walletId: walletId,
                 amount: parsedAmount,
                 paymentMethodId: nil
             )
@@ -445,6 +448,50 @@ struct WalletTopUpView: View {
                 errorMessage = "Ошибка: \(error.localizedDescription)"
                 isProcessing = false
             }
+        }
+    }
+
+    /// Resolve an актуальный wallet ID before top-up.
+    /// This prevents "Wallet not found" when local state contains stale IDs after db reset.
+    private func resolveWalletIdForTopUp() async throws -> UUID {
+        let userId = await MainActor.run {
+            authService.currentUser?.id ?? AuthService.shared.currentUser?.id
+        }
+        
+        guard let userId else {
+            throw WalletServiceError.authenticationRequired
+        }
+        
+        let wallets = try await walletService.getUserWallets(userId: userId)
+        
+        // Current ID is still valid
+        if wallets.contains(where: { $0.id == wallet.id }) {
+            return wallet.id
+        }
+        
+        switch wallet.walletType {
+        case .citypass:
+            if let existing = wallets.first(where: { $0.walletType == .citypass }) {
+                return existing.id
+            }
+            return try await walletService.createCityPassWallet(userId: userId)
+            
+        case .cafe_wallet:
+            if let byCafe = wallet.cafeId {
+                if let existing = wallets.first(where: { $0.walletType == .cafe_wallet && $0.cafeId == byCafe }) {
+                    return existing.id
+                }
+                return try await walletService.createCafeWallet(userId: userId, cafeId: byCafe, networkId: nil)
+            }
+            
+            if let byNetwork = wallet.networkId {
+                if let existing = wallets.first(where: { $0.walletType == .cafe_wallet && $0.networkId == byNetwork }) {
+                    return existing.id
+                }
+                return try await walletService.createCafeWallet(userId: userId, cafeId: nil, networkId: byNetwork)
+            }
+            
+            throw WalletServiceError.unknown("Кошелёк кофейни не привязан к кафе или сети")
         }
     }
     
@@ -481,4 +528,5 @@ struct WalletTopUpView: View {
             createdAt: Date()
         )
     )
+    .environmentObject(AuthService.shared)
 }
