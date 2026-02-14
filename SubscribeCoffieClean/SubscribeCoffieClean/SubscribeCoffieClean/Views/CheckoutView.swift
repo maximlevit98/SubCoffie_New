@@ -10,11 +10,12 @@ import SwiftUI
 struct CheckoutView: View {
     @Binding var isPresented: Bool
     let cart: CartStore
-    let wallet: WalletStore
+    let wallet: WalletStore  // Deprecated: kept for compatibility
     let selectedCafe: CafeSummary?
     let onOrderSuccess: (UUID) -> Void
     
     @EnvironmentObject var authService: AuthService
+    @EnvironmentObject var realWalletStore: RealWalletStore
     
     @State private var isProcessing = false
     @State private var errorMessage: String?

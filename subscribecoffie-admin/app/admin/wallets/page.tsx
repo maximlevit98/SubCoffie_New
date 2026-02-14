@@ -12,7 +12,7 @@ type WalletsPageProps = {
 };
 
 export default async function WalletsPage({ searchParams }: WalletsPageProps) {
-  let wallets: any[] = [];
+  let wallets: any[] | null = [];
   let stats: any = null;
   let error: string | null = null;
   

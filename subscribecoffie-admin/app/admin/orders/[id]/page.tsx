@@ -189,6 +189,61 @@ export default async function OrderDetailsPage({
           </dl>
         </div>
 
+        {/* Wallet & Payment Information */}
+        {(order.wallet_id || order.payment_transaction_id) && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-6">
+            <h3 className="text-lg font-semibold mb-4 text-emerald-900">
+              💳 Оплата
+            </h3>
+            <dl className="space-y-3 text-sm">
+              {order.wallet_id && (
+                <div className="flex flex-col gap-1">
+                  <dt className="text-emerald-600 font-medium">Кошелёк:</dt>
+                  <dd className="flex items-center gap-2">
+                    <span className="font-mono text-xs bg-white px-2 py-1 rounded border border-emerald-200">
+                      {order.wallet_id.slice(0, 8)}...
+                    </span>
+                    <Link
+                      href={`/admin/wallets/${order.user_id || userProfile?.id}`}
+                      className="text-xs text-emerald-600 hover:text-emerald-700 underline"
+                    >
+                      Открыть →
+                    </Link>
+                  </dd>
+                </div>
+              )}
+              {order.payment_transaction_id && (
+                <div className="flex flex-col gap-1">
+                  <dt className="text-emerald-600 font-medium">Транзакция:</dt>
+                  <dd className="font-mono text-xs bg-white px-2 py-1 rounded border border-emerald-200 inline-block">
+                    {order.payment_transaction_id.slice(0, 8)}...
+                  </dd>
+                </div>
+              )}
+              {order.payment_method && (
+                <div className="flex flex-col gap-1">
+                  <dt className="text-emerald-600 font-medium">Метод оплаты:</dt>
+                  <dd className="font-medium text-emerald-900">
+                    {order.payment_method === "wallet" && "💰 Кошелёк"}
+                    {order.payment_method === "card" && "💳 Карта"}
+                    {order.payment_method === "cash" && "💵 Наличные"}
+                    {order.payment_method === "subscription" && "🔄 Подписка"}
+                    {!["wallet", "card", "cash", "subscription"].includes(order.payment_method) && order.payment_method}
+                  </dd>
+                </div>
+              )}
+              {order.payment_status && (
+                <div className="flex flex-col gap-1">
+                  <dt className="text-emerald-600 font-medium">Статус оплаты:</dt>
+                  <dd>
+                    <PaymentStatusBadge status={order.payment_status} />
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        )}
+
         {/* History */}
         <div className="rounded-lg border border-zinc-200 bg-white p-6">
           <h3 className="text-lg font-semibold mb-4">История статусов</h3>
@@ -287,6 +342,32 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={`inline-flex items-center rounded-full px-3 py-1 text-sm font-medium ${config.color}`}
+    >
+      {config.label}
+    </span>
+  );
+}
+
+// Payment Status Badge Component
+function PaymentStatusBadge({ status }: { status: string }) {
+  const statusConfig: Record<
+    string,
+    { label: string; color: string }
+  > = {
+    pending: { label: "Ожидание", color: "bg-amber-100 text-amber-700" },
+    paid: { label: "Оплачено", color: "bg-emerald-100 text-emerald-700" },
+    failed: { label: "Ошибка", color: "bg-red-100 text-red-700" },
+    refunded: { label: "Возврат", color: "bg-purple-100 text-purple-700" },
+  };
+
+  const config = statusConfig[status] || {
+    label: status,
+    color: "bg-zinc-100 text-zinc-700",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${config.color}`}
     >
       {config.label}
     </span>
