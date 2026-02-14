@@ -560,13 +560,6 @@ struct ContentView: View {
             return
         }
 
-        // Fast path: already in memory
-        if let existing = realWalletStore.cityPassWallet {
-            realWalletStore.selectWallet(existing)
-            walletTopUpWallet = existing
-            return
-        }
-
         await realWalletStore.loadWallets()
 
         do {
@@ -601,13 +594,6 @@ struct ContentView: View {
 
         guard authService.currentUser != nil else {
             handleWalletFlowError(WalletServiceError.authenticationRequired)
-            return
-        }
-
-        // Fast path: already in memory
-        if let existing = realWalletStore.cafeWallet(forCafe: cafe.id) {
-            realWalletStore.selectWallet(existing)
-            walletTopUpWallet = existing
             return
         }
 

@@ -53,6 +53,9 @@ final class RealWalletStore: ObservableObject {
     /// Load all wallets for the current user
     func loadWallets() async {
         guard let userId = authService.currentUser?.id else {
+            wallets = []
+            selectedWallet = nil
+            clearSelection()
             errorMessage = "User not authenticated"
             return
         }
