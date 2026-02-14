@@ -127,8 +127,13 @@ class WalletService: ObservableObject {
                 throw WalletServiceError.userNotFoundInDatabase
             }
             
-            // Check for FK constraint violation (23503) - but only if it's about auth.users
-            if errorMessage.contains("23503") && errorMessage.contains("auth.users") {
+            // Check for FK constraint violation (23503) when user row is missing
+            if errorMessage.contains("23503") &&
+                (
+                    errorMessage.contains("auth.users") ||
+                    errorMessage.contains("wallets_user_id_fkey") ||
+                    errorMessage.contains("table \\\"users\\\"")
+                ) {
                 try? await AuthService.shared.signOut()
                 throw WalletServiceError.userNotFoundInDatabase
             }
@@ -188,8 +193,13 @@ class WalletService: ObservableObject {
                 throw WalletServiceError.userNotFoundInDatabase
             }
             
-            // Check for FK constraint violation (23503) - but only if it's about auth.users
-            if errorMessage.contains("23503") && errorMessage.contains("auth.users") {
+            // Check for FK constraint violation (23503) when user row is missing
+            if errorMessage.contains("23503") &&
+                (
+                    errorMessage.contains("auth.users") ||
+                    errorMessage.contains("wallets_user_id_fkey") ||
+                    errorMessage.contains("table \\\"users\\\"")
+                ) {
                 try? await AuthService.shared.signOut()
                 throw WalletServiceError.userNotFoundInDatabase
             }

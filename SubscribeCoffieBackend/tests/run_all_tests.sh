@@ -47,12 +47,12 @@ else
 fi
 
 echo ""
-echo "Step 3: Running Wallets RPC tests..."
+echo "Step 3: Running Wallets Canonical RPC tests..."
 echo "========================================="
-psql "$DATABASE_URL" -f tests/wallets_rpc.test.sql
+psql "$DATABASE_URL" -f tests/wallets_canonical.test.sql
 
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ Wallets RPC tests passed${NC}"
+    echo -e "${GREEN}✅ Wallets Canonical RPC tests passed${NC}"
 else
     echo -e "${RED}❌ Wallets RPC tests failed${NC}"
     exit 1
@@ -102,7 +102,7 @@ echo ""
 echo "Test Summary:"
 echo "  - Test data: ✅"
 echo "  - Orders RPC: ✅"
-echo "  - Wallets RPC: ✅"
+echo "  - Wallets Canonical RPC: ✅"
 echo "  - Analytics: ✅"
 echo "  - Payment Integration: ✅"
 echo "  - RPC Integration: ✅"

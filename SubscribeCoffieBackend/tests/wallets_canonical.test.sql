@@ -295,6 +295,50 @@ BEGIN
 END $$;
 
 -- ============================================================================
+-- Test 6: get_user_transaction_history (payment_transactions history)
+-- ============================================================================
+
+\echo ''
+\echo '📦 Test 6.1: get_user_transaction_history - returns payment transaction history'
+
+DO $$
+DECLARE
+  v_user_id uuid;
+  v_wallet_id uuid;
+  v_result jsonb;
+  v_count int;
+  v_tx record;
+BEGIN
+  SELECT id INTO v_user_id FROM auth.users LIMIT 1;
+
+  -- Ensure wallet exists and has at least one top-up transaction
+  v_wallet_id := public.create_citypass_wallet(v_user_id);
+  v_result := public.mock_wallet_topup(v_wallet_id, 700, NULL, 'test_user_tx_history_1');
+
+  SELECT COUNT(*) INTO v_count
+  FROM public.get_user_transaction_history(v_user_id, 20, 0);
+
+  IF v_count >= 1 THEN
+    RAISE NOTICE '✅ PASS: get_user_transaction_history returned % row(s)', v_count;
+  ELSE
+    RAISE EXCEPTION '❌ FAIL: get_user_transaction_history returned no rows';
+  END IF;
+
+  SELECT * INTO v_tx
+  FROM public.get_user_transaction_history(v_user_id, 1, 0)
+  LIMIT 1;
+
+  IF v_tx.id IS NOT NULL
+     AND v_tx.user_id = v_user_id
+     AND v_tx.transaction_type IS NOT NULL
+     AND v_tx.amount_credits IS NOT NULL THEN
+    RAISE NOTICE '✅ PASS: transaction history schema is valid';
+  ELSE
+    RAISE EXCEPTION '❌ FAIL: invalid transaction history row';
+  END IF;
+END $$;
+
+-- ============================================================================
 -- Summary
 -- ============================================================================
 
@@ -309,6 +353,7 @@ END $$;
 \echo '  ✅ mock_wallet_topup (basic)'
 \echo '  ✅ validate_wallet_for_order (CityPass)'
 \echo '  ✅ get_wallet_transactions (transaction history)'
+\echo '  ✅ get_user_transaction_history (payment history)'
 \echo ''
 \echo 'Canonical Fields Verified:'
 \echo '  ✅ wallet_type (enum)'

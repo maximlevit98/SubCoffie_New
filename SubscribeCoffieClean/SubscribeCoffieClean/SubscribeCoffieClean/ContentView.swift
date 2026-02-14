@@ -10,7 +10,6 @@ struct ContentView: View {
         case profileSetup
         case walletChoice
         case selectCafeForWallet
-        case walletTopUp
         case onboarding
         case map
         case cafe
@@ -52,7 +51,6 @@ struct ContentView: View {
     @StateObject private var cart = CartStore()
     @StateObject private var orderStore = OrderStore()
     @StateObject private var wallet = WalletStore()
-    @StateObject private var cafeWallet = CafeWalletStore()
     @StateObject private var realWalletStore = RealWalletStore()
     @StateObject private var filterStore = FilterStore()
 
@@ -62,19 +60,15 @@ struct ContentView: View {
 
     // sheets
     @State private var isCityPassCafesPresented: Bool = false
-    @State private var isWalletTopUpPresented: Bool = false
+    @State private var walletTopUpWallet: Wallet? = nil
     @State private var isWalletDemoPresented: Bool = false
-    @State private var isCafeWalletPickerPresented: Bool = false
-    @State private var walletTopUpType: WalletType = .citypass
-    @State private var walletTopUpScopeTitle: String = "CityPass"
     @State private var pendingWalletType: WalletType? = nil
     @State private var pendingWalletScopeId: String? = nil
     @State private var pendingWalletScopeName: String? = nil
-    @State private var isSelectingWalletCafe: Bool = false
-    @State private var didCompleteWalletTopUp: Bool = false
     @State private var pendingBonusToUse: Int = 0
     @State private var isProfilePresented: Bool = false
-    @State private var isTopUpFlowPresented: Bool = false
+    @State private var walletFlowErrorMessage: String? = nil
+    @State private var showWalletFlowError: Bool = false
     
     // Services
     private let orderService = OrderService()
@@ -91,16 +85,12 @@ struct ContentView: View {
         // Первые 3 кофейни поддерживают CityPass (заглушка)
         Array(availableCafes.prefix(3))
     }
-    
-    private var cafeWalletSupportedCafes: [CafeSummary] {
-        availableCafes.filter { $0.canPlaceOrder }
-    }
 
     private var canGoBack: Bool {
         switch currentScreen {
         case .login, .onboarding, .walletChoice:
             return false
-        case .profileSetup, .walletTopUp, .map, .cafe, .cart, .checkout, .orderStatus, .selectCafeForWallet:
+        case .profileSetup, .map, .cafe, .cart, .checkout, .orderStatus, .selectCafeForWallet:
             return true
         }
     }
@@ -111,7 +101,6 @@ struct ContentView: View {
         case .profileSetup: return "Анкета"
             case .walletChoice: return "Выбор кошелька"
             case .selectCafeForWallet: return "Выбор кофейни для кошелька"
-        case .walletTopUp:  return "Пополнение"
         case .onboarding:   return "SubscribeCoffie"
         case .map:          return "Выбор кофейни"
         case .cafe:         return selectedCafeName
@@ -133,19 +122,11 @@ struct ContentView: View {
         case .walletChoice:
             break
 
-        case .walletTopUp:
-            currentScreen = .walletChoice
-
         case .onboarding:
             break
 
         case .map:
-            if isSelectingWalletCafe {
-                isSelectingWalletCafe = false
-                currentScreen = .walletChoice
-            } else {
-                currentScreen = .onboarding
-            }
+            currentScreen = .onboarding
 
         case .selectCafeForWallet:
             currentScreen = .walletChoice
@@ -190,12 +171,9 @@ struct ContentView: View {
                 case .walletChoice:
                     WalletChoiceView(
                         onCityPassSelected: {
-                            pendingWalletType = .citypass
-                            pendingWalletScopeId = nil
-                            pendingWalletScopeName = nil
-                            walletTopUpType = .citypass
-                            walletTopUpScopeTitle = "CityPass"
-                            isWalletTopUpPresented = true
+                            Task {
+                                await startCityPassTopUpFlow()
+                            }
                         },
                         onCityPassCafes: {
                             isCityPassCafesPresented = true
@@ -208,21 +186,6 @@ struct ContentView: View {
                         }
                     )
 
-                case .walletTopUp:
-                    // Temporary: Create a mock Wallet from WalletStore data
-                    let tempWallet = Wallet(
-                        id: UUID(),
-                        walletType: .citypass,
-                        balanceCredits: wallet.credits,
-                        lifetimeTopUpCredits: wallet.lifetimeTopUp,
-                        cafeId: nil,
-                        cafeName: nil,
-                        networkId: nil,
-                        networkName: nil,
-                        createdAt: Date()
-                    )
-                    WalletTopUpView(wallet: tempWallet)
-
                 case .onboarding:
                     OnboardingView {
                         currentScreen = .map
@@ -230,24 +193,15 @@ struct ContentView: View {
 
                 case .map:
                     CafePickerView { cafe in
-                        if isSelectingWalletCafe {
-                            pendingWalletScopeId = cafe.id.uuidString
-                            pendingWalletScopeName = cafe.name
-                            walletTopUpType = .cafe_wallet
-                            walletTopUpScopeTitle = cafe.name
-                            isWalletTopUpPresented = true
-                            isSelectingWalletCafe = false
-                        } else {
-                            Task {
-                                await handleCafeSelection(cafe, persistLastCafe: true)
-                            }
+                        Task {
+                            await handleCafeSelection(cafe, persistLastCafe: true)
                         }
                     }
 
                 case .selectCafeForWallet:
                     CafePickerView { cafe in
                         Task {
-                            await handleCafeWalletSelection(cafe)
+                            await startCafeWalletTopUpFlow(for: cafe)
                         }
                     }
 
@@ -263,10 +217,14 @@ struct ContentView: View {
                                 currentScreen = .cart
                             },
                             onTopUpCityPass: {
-                                isTopUpFlowPresented = true
+                                Task {
+                                    await startCityPassTopUpFlow()
+                                }
                             },
                             onTopUpCafeWallet: {
-                                isTopUpFlowPresented = true
+                                Task {
+                                    await startCafeWalletTopUpFlow(for: cafe)
+                                }
                             }
                         )
                     } else {
@@ -344,40 +302,30 @@ struct ContentView: View {
         .sheet(isPresented: $isCityPassCafesPresented) {
             CityPassCafesView(cafes: cityPassCafes)
         }
-        .sheet(isPresented: $isCafeWalletPickerPresented) {
-            CafeWalletCafePickerView(cafes: cafeWalletSupportedCafes) { cafe in
-                pendingWalletScopeId = cafe.id.uuidString
-                pendingWalletScopeName = cafe.name
-                walletTopUpType = .cafe_wallet
-                walletTopUpScopeTitle = cafe.name
-                isCafeWalletPickerPresented = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    isWalletTopUpPresented = true
-                }
-            }
-        }
-        .sheet(isPresented: $isWalletTopUpPresented, onDismiss: {
+        .sheet(item: $walletTopUpWallet, onDismiss: {
             handleWalletTopUpDismiss()
-        }) {
-            let tempWallet = Wallet(
-                id: UUID(),
-                walletType: .citypass,
-                balanceCredits: wallet.credits,
-                lifetimeTopUpCredits: wallet.lifetimeTopUp,
-                cafeId: nil,
-                cafeName: nil,
-                networkId: nil,
-                networkName: nil,
-                createdAt: Date()
-            )
-            WalletTopUpView(wallet: tempWallet)
+        }) { walletToTopUp in
+            WalletTopUpView(wallet: walletToTopUp, onTopUpSuccess: {
+                Task {
+                    await realWalletStore.refreshWallets()
+                    await MainActor.run {
+                        if let refreshedWallet = realWalletStore.wallet(by: walletToTopUp.id) {
+                            realWalletStore.selectWallet(refreshedWallet)
+                        }
+                        proceedAfterWalletSetup()
+                    }
+                }
+            })
         }
         .sheet(isPresented: $isWalletDemoPresented) {
             WalletChoiceView(
                 onCityPassSelected: {
-                    walletTopUpType = .citypass
-                    walletTopUpScopeTitle = "CityPass"
-                    isWalletTopUpPresented = true
+                    isWalletDemoPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        Task {
+                            await startCityPassTopUpFlow()
+                        }
+                    }
                 },
                 onCityPassCafes: {
                     isCityPassCafesPresented = true
@@ -387,9 +335,7 @@ struct ContentView: View {
                     pendingWalletScopeId = nil
                     pendingWalletScopeName = nil
                     isWalletDemoPresented = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        isCafeWalletPickerPresented = true
-                    }
+                    currentScreen = .selectCafeForWallet
                 }
             )
         }
@@ -408,16 +354,10 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $isTopUpFlowPresented) {
-            TopUpFlowView(
-                cityPassWallet: wallet,
-                cafeWallet: cafeWallet,
-                cafeName: selectedCafeName,
-                supportsCityPass: selectedCafe.map { supportsCityPass(for: $0) } ?? true,
-                onDone: {
-                    isTopUpFlowPresented = false
-                }
-            )
+        .alert("Ошибка кошелька", isPresented: $showWalletFlowError) {
+            Button("ОК", role: .cancel) { }
+        } message: {
+            Text(walletFlowErrorMessage ?? "Неизвестная ошибка")
         }
 #if DEBUG
         .task {
@@ -451,8 +391,6 @@ struct ContentView: View {
     
     // MARK: - Wallet setup logic
     private func proceedAfterWalletSetup() {
-        didCompleteWalletTopUp = true
-
         if let pendingType = pendingWalletType {
             walletType = pendingType.rawValue
             defaultWalletKind = pendingType.rawValue
@@ -474,17 +412,14 @@ struct ContentView: View {
     }
 
     private func handleWalletTopUpDismiss() {
-        if didCompleteWalletTopUp {
-            didCompleteWalletTopUp = false
-            return
-        }
-
         // Если пополнение отменили — сбрасываем выбор и возвращаемся к выбору кошелька
-        pendingWalletType = nil
-        pendingWalletScopeId = nil
-        pendingWalletScopeName = nil
-        if walletType.isEmpty {
-            currentScreen = .walletChoice
+        if pendingWalletType != nil {
+            pendingWalletType = nil
+            pendingWalletScopeId = nil
+            pendingWalletScopeName = nil
+            if currentScreen == .selectCafeForWallet || walletType.isEmpty {
+                currentScreen = .walletChoice
+            }
         }
     }
 
@@ -495,6 +430,7 @@ struct ContentView: View {
 
     private func routeAfterAuth() {
         Task {
+            await realWalletStore.loadWallets()
             let screen = await determineStartScreen()
             await MainActor.run { currentScreen = screen }
         }
@@ -502,6 +438,10 @@ struct ContentView: View {
 
     private func determineStartScreen() async -> AppScreen {
         if !authService.isAuthenticated { return .login }
+
+        if !realWalletStore.hasWallets {
+            return .walletChoice
+        }
 
         // если default wallet kind не задан — старое поведение
         if defaultWalletKind.isEmpty {
@@ -521,7 +461,7 @@ struct ContentView: View {
         }
 
         if defaultWalletKind == WalletType.cafe_wallet.rawValue {
-            let boundId = !cafeWalletCafeId.isEmpty ? cafeWalletCafeId : (cafeWallet.cafeId ?? "")
+            let boundId = cafeWalletCafeId
             if let cafe = cafeById(boundId) {
                 let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
                 await MainActor.run {
@@ -539,6 +479,7 @@ struct ContentView: View {
 
     private func bootstrap() async {
         await fetchCafesIfNeeded(force: true)
+        await realWalletStore.loadWallets()
 
         let screen = await determineStartScreen()
         await MainActor.run {
@@ -585,18 +526,62 @@ struct ContentView: View {
         }
     }
 
-    private func handleCafeWalletSelection(_ cafe: CafeSummary) async {
-        await MainActor.run { isMenuLoading = true }
-        let result = await cafeRepository.fetchMenuResult(cafeId: cafe.id)
-        await MainActor.run {
-            cafeWalletCafeId = cafe.id.uuidString
-            cafeWalletCafeName = cafe.name
-            cafeWallet.selectCafe(cafe)
-            menuSchemaUnavailable = result.schemaMissing
-            applyCafeSelection(cafe: cafe, menu: result.menu, persistLastCafe: true)
-            isMenuLoading = false
-            currentScreen = .cafe
+    @MainActor
+    private func startCityPassTopUpFlow() async {
+        pendingWalletType = .citypass
+        pendingWalletScopeId = nil
+        pendingWalletScopeName = nil
+
+        await realWalletStore.loadWallets()
+
+        do {
+            let walletToTopUp: Wallet
+            if let existing = realWalletStore.cityPassWallet {
+                walletToTopUp = existing
+            } else {
+                walletToTopUp = try await realWalletStore.createCityPassWallet()
+            }
+
+            realWalletStore.selectWallet(walletToTopUp)
+            walletTopUpWallet = walletToTopUp
+        } catch {
+            handleWalletFlowError(error)
         }
+    }
+
+    @MainActor
+    private func startCafeWalletTopUpFlow(for cafe: CafeSummary) async {
+        pendingWalletType = .cafe_wallet
+        pendingWalletScopeId = cafe.id.uuidString
+        pendingWalletScopeName = cafe.name
+        cafeWalletCafeId = cafe.id.uuidString
+        cafeWalletCafeName = cafe.name
+
+        await realWalletStore.loadWallets()
+
+        do {
+            let walletToTopUp: Wallet
+            if let existing = realWalletStore.cafeWallet(forCafe: cafe.id) {
+                walletToTopUp = existing
+            } else {
+                walletToTopUp = try await realWalletStore.createCafeWallet(cafeId: cafe.id, networkId: nil)
+            }
+
+            realWalletStore.selectWallet(walletToTopUp)
+            walletTopUpWallet = walletToTopUp
+        } catch {
+            handleWalletFlowError(error)
+        }
+    }
+
+    @MainActor
+    private func handleWalletFlowError(_ error: Error) {
+        pendingWalletType = nil
+        pendingWalletScopeId = nil
+        pendingWalletScopeName = nil
+
+        walletFlowErrorMessage = error.localizedDescription
+        showWalletFlowError = true
     }
 
     private func applyCafeSelection(cafe: CafeSummary, menu: CafeMenu, persistLastCafe: Bool) {
@@ -615,6 +600,8 @@ struct ContentView: View {
         }
         cart.reset()
         orderStore.reset()
+        realWalletStore.clearSelection()
+        walletTopUpWallet = nil
         selectedCafe = nil
         defaultWalletKind = ""
         lastCafeId = ""
