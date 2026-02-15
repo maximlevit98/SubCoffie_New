@@ -5,21 +5,22 @@ import { WalletsFilters } from "./WalletsFilters";
 import { WalletStatsCards } from "./WalletStatsCards";
 
 type WalletsPageProps = {
-  searchParams: {
+  searchParams: Promise<{
     search?: string;
     type?: string;
     sort?: string;
     page?: string;
     limit?: string;
-  };
+  }>;
 };
 
 export default async function WalletsPage({ searchParams }: WalletsPageProps) {
-  const search = searchParams.search || "";
-  const typeFilter = searchParams.type;
-  const sortBy = searchParams.sort || "created_at";
-  const page = parseInt(searchParams.page || "1", 10);
-  const limit = parseInt(searchParams.limit || "50", 10);
+  const params = await searchParams;
+  const search = params.search || "";
+  const typeFilter = params.type;
+  const sortBy = params.sort || "created_at";
+  const page = parseInt(params.page || "1", 10);
+  const limit = parseInt(params.limit || "50", 10);
   const offset = (page - 1) * limit;
 
   let wallets: AdminWallet[] | null = null;
