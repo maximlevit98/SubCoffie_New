@@ -162,9 +162,13 @@ export async function listWalletsAdmin(options?: {
     p_search: options?.search || null,
   });
 
-  // Fallback to legacy listWallets if RPC doesn't exist
-  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
-    console.warn("admin_get_wallets RPC not found, falling back to legacy listWallets()");
+  // Fallback to legacy listWallets if RPC doesn't exist OR if admin check fails
+  if (error && (
+    (error.message?.includes("function") && error.message?.includes("does not exist")) ||
+    error.message?.includes("Admin access required") ||
+    error.message?.includes("Unauthorized")
+  )) {
+    console.warn("admin_get_wallets RPC error, falling back to legacy listWallets():", error.message);
     const legacyResult = await listWallets();
     
     if (legacyResult.error) {
@@ -381,8 +385,12 @@ export async function getWalletOverview(walletId: string) {
   });
 
   // Fallback: construct from available data
-  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
-    console.warn("admin_get_wallet_overview RPC not found, using fallback");
+  if (error && (
+    (error.message?.includes("function") && error.message?.includes("does not exist")) ||
+    error.message?.includes("Admin access required") ||
+    error.message?.includes("Unauthorized")
+  )) {
+    console.warn("admin_get_wallet_overview RPC error, using fallback:", error.message);
     
     // Get basic wallet info
     const { data: walletData, error: walletError } = await supabase
@@ -482,8 +490,12 @@ export async function getWalletTransactionsAdmin(
   });
 
   // Fallback to legacy getWalletTransactions
-  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
-    console.warn("admin_get_wallet_transactions RPC not found, using fallback");
+  if (error && (
+    (error.message?.includes("function") && error.message?.includes("does not exist")) ||
+    error.message?.includes("Admin access required") ||
+    error.message?.includes("Unauthorized")
+  )) {
+    console.warn("admin_get_wallet_transactions RPC error, using fallback:", error.message);
     const legacyResult = await getWalletTransactions(walletId, limit, offset);
     
     if (legacyResult.error) {
@@ -535,8 +547,13 @@ export async function getWalletPayments(
   });
 
   // Fallback: return empty array (payment_transactions might not exist)
-  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
-    console.warn("admin_get_wallet_payments RPC not found, returning empty array");
+  if (error && (
+    (error.message?.includes("function") && error.message?.includes("does not exist")) ||
+    error.message?.includes("Admin access required") ||
+    error.message?.includes("Unauthorized") ||
+    error.message?.includes("does not exist") // table might not exist
+  )) {
+    console.warn("admin_get_wallet_payments RPC error, returning empty array:", error.message);
     return { data: [], error: null };
   }
 
@@ -565,8 +582,13 @@ export async function getWalletOrders(
   });
 
   // Fallback: return empty array (orders_core might not have this structure)
-  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
-    console.warn("admin_get_wallet_orders RPC not found, returning empty array");
+  if (error && (
+    (error.message?.includes("function") && error.message?.includes("does not exist")) ||
+    error.message?.includes("Admin access required") ||
+    error.message?.includes("Unauthorized") ||
+    error.message?.includes("does not exist") // table might not exist
+  )) {
+    console.warn("admin_get_wallet_orders RPC error, returning empty array:", error.message);
     return { data: [], error: null };
   }
 
