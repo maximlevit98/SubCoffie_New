@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import Link from "next/link";
 import { type AdminWalletOrder } from "../../../../lib/supabase/queries/wallets";
 
@@ -132,11 +133,11 @@ function OrderCard({ order }: { order: AdminWalletOrder }) {
                     </span>
                   </div>
                   
-                  {Boolean(item.modifiers) && (
+                  {item.modifiers ? (
                     <div className="text-xs text-zinc-500 mt-1">
                       <ModifiersDisplay modifiers={item.modifiers} />
                     </div>
-                  )}
+                  ) : null}
                 </div>
 
                 <div className="text-right ml-4">
@@ -238,7 +239,7 @@ function PaymentStatusBadge({ status }: { status: string }) {
   );
 }
 
-function ModifiersDisplay({ modifiers }: { modifiers: unknown }) {
+function ModifiersDisplay({ modifiers }: { modifiers: unknown }): React.ReactNode {
   if (!modifiers) return null;
   
   let modArray: unknown[] = [];
@@ -259,37 +260,14 @@ function ModifiersDisplay({ modifiers }: { modifiers: unknown }) {
 
   return (
     <div className="flex flex-wrap gap-1">
-      {modArray.map((mod, idx) => (
-        <span key={idx} className="inline-block px-1.5 py-0.5 bg-zinc-100 rounded text-xs">
-          {formatModifier(mod)}
-        </span>
-      ))}
+      {modArray.map((mod, idx: number) => {
+        const typedMod = mod as { name?: string; value?: string };
+        return (
+          <span key={idx} className="inline-block px-1.5 py-0.5 bg-zinc-100 rounded text-xs">
+            {typedMod.name || typedMod.value || JSON.stringify(mod)}
+          </span>
+        );
+      })}
     </div>
   );
-}
-
-function formatModifier(modifier: unknown): string {
-  if (modifier === null || modifier === undefined) {
-    return "—";
-  }
-
-  if (typeof modifier === "string" || typeof modifier === "number" || typeof modifier === "boolean") {
-    return String(modifier);
-  }
-
-  if (typeof modifier === "object") {
-    const obj = modifier as Record<string, unknown>;
-    const named = obj.name;
-    const valued = obj.value;
-
-    if (typeof named === "string" && named.length > 0) {
-      return named;
-    }
-
-    if (typeof valued === "string" && valued.length > 0) {
-      return valued;
-    }
-  }
-
-  return JSON.stringify(modifier) ?? String(modifier);
 }

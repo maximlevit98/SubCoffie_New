@@ -167,7 +167,7 @@ export default async function CafeOwnerAnalyticsPage({
               <p className="text-sm text-zinc-600">Всего заказов</p>
               <p className="mt-2 text-lg font-semibold">
                 {hourlyStats.reduce(
-                  (sum, h) => sum + (Number(h.orders_count) || 0),
+                  (sum: number, h: { orders_count?: number }) => sum + (Number(h.orders_count) || 0),
                   0
                 )}
               </p>
@@ -177,7 +177,7 @@ export default async function CafeOwnerAnalyticsPage({
               <p className="mt-2 text-lg font-semibold">
                 {Math.round(
                   hourlyStats.reduce(
-                    (sum, h) => sum + (Number(h.avg_order_value) || 0),
+                    (sum: number, h: { avg_order_value?: number }) => sum + (Number(h.avg_order_value) || 0),
                     0
                   ) / hourlyStats.length
                 )}{" "}
