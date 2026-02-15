@@ -11,15 +11,15 @@ import {
 import { WalletDetailClient } from "./WalletDetailClient";
 
 type WalletDetailsPageProps = {
-  params: {
+  params: Promise<{
     walletId: string;
-  };
+  }>;
 };
 
 export default async function WalletDetailsPage({
   params,
 }: WalletDetailsPageProps) {
-  const identifier = params.walletId;
+  const { walletId: identifier } = await params;
   let error: string | null = null;
 
   // Primary path: identifier is wallet_id

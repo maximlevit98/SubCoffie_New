@@ -1,4 +1,4 @@
-import { createAdminClient } from "../admin";
+import { createServerClient } from "../server";
 
 // CANONICAL SCHEMA (updated 2026-02-05 P4 - Multiple wallets support)
 export type Wallet = {
@@ -170,7 +170,7 @@ export async function listWalletsAdmin(options?: {
   offset?: number;
   search?: string;
 }) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("admin_get_wallets", {
     p_limit: options?.limit || 50,
@@ -236,7 +236,7 @@ export async function listWalletsAdmin(options?: {
  * DEPRECATED: Use listWalletsAdmin for list views
  */
 export async function listWallets() {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase
     .from("wallets")
@@ -316,7 +316,7 @@ export async function listWallets() {
  * UPDATED: 2026-02-05 P4 - Returns array of wallets (CityPass + Cafe Wallets)
  */
 export async function getWalletsByUserId(userId: string): Promise<{ data: Wallet[] | null; error: string | null }> {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("get_user_wallets", {
     p_user_id: userId,
@@ -361,7 +361,7 @@ export async function getWalletTransactions(
   limit: number = 50,
   offset: number = 0
 ) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase
     .from("wallet_transactions")
@@ -379,7 +379,7 @@ export async function getWalletTransactions(
  * TODO: Create new RPC with canonical schema if needed
  */
 export async function getWalletsStats() {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   // Direct aggregation query
   const { data, error } = await supabase
@@ -409,7 +409,7 @@ export async function getWalletsStats() {
  * UPDATED: 2026-02-14 - Uses admin_get_wallet_overview RPC with fallback
  */
 export async function getWalletOverview(walletId: string) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("admin_get_wallet_overview", {
     p_wallet_id: walletId,
@@ -514,7 +514,7 @@ export async function getWalletTransactionsAdmin(
   limit: number = 50,
   offset: number = 0
 ) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("admin_get_wallet_transactions", {
     p_wallet_id: walletId,
@@ -571,7 +571,7 @@ export async function getWalletPayments(
   limit: number = 50,
   offset: number = 0
 ) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("admin_get_wallet_payments", {
     p_wallet_id: walletId,
@@ -606,7 +606,7 @@ export async function getWalletOrders(
   limit: number = 50,
   offset: number = 0
 ) {
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("admin_get_wallet_orders", {
     p_wallet_id: walletId,

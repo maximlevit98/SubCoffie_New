@@ -4,29 +4,35 @@ import { getOrders, getOrdersStats } from "./actions";
 import { OrdersTable } from "./OrdersTable";
 
 type OrdersPageProps = {
-  searchParams?: {
+  searchParams: Promise<{
     status?: string;
     cafe?: string;
-  };
+  }>;
 };
 
 export default async function OrdersPage({ searchParams }: OrdersPageProps) {
-  let orders: any[] = [];
-  let stats: any = null;
+  const params = await searchParams;
+  let orders: unknown[] = [];
+  let stats: {
+    by_status?: Record<string, number>;
+    total_orders?: number;
+    total_revenue?: number;
+    avg_order_value?: number;
+  } | null = null;
   let error: string | null = null;
 
   try {
     [orders, stats] = await Promise.all([
       getOrders({
-        status: searchParams?.status,
-        cafeId: searchParams?.cafe,
+        status: params?.status,
+        cafeId: params?.cafe,
       }),
       getOrdersStats({
-        cafeId: searchParams?.cafe,
+        cafeId: params?.cafe,
       }),
     ]);
-  } catch (e: any) {
-    error = e.message;
+  } catch (e: unknown) {
+    error = e instanceof Error ? e.message : "Unknown error";
   }
 
   if (error) {
@@ -95,7 +101,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
         <Link
           href="/admin/orders"
           className={`px-3 py-1.5 rounded text-sm ${
-            !searchParams?.status
+            !params?.status
               ? "bg-zinc-900 text-white"
               : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
           }`}
@@ -108,7 +114,7 @@ export default async function OrdersPage({ searchParams }: OrdersPageProps) {
               key={status}
               href={`/admin/orders?status=${status}`}
               className={`px-3 py-1.5 rounded text-sm ${
-                searchParams?.status === status
+                params?.status === status
                   ? "bg-zinc-900 text-white"
                   : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
               }`}

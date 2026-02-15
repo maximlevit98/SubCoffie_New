@@ -1,9 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 
-import { createAdminClient } from "../../../lib/supabase/admin";
+import { createServerClient } from "../../../lib/supabase/server";
 import { requireAdmin } from "../../../lib/supabase/roles";
 
 /**
@@ -11,7 +10,7 @@ import { requireAdmin } from "../../../lib/supabase/roles";
  */
 export async function updateOrderStatus(orderId: string, newStatus: string) {
   const { userId } = await requireAdmin();
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("update_order_status", {
     order_id: orderId,
@@ -34,7 +33,7 @@ export async function updateOrderStatus(orderId: string, newStatus: string) {
  */
 export async function getOrderDetails(orderId: string) {
   await requireAdmin();
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("get_order_details", {
     order_id_param: orderId,
@@ -57,7 +56,7 @@ export async function getOrders(options?: {
   offset?: number;
 }) {
   await requireAdmin();
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("get_orders_by_cafe", {
     cafe_id_param: options?.cafeId || null,
@@ -82,7 +81,7 @@ export async function getOrdersStats(options?: {
   toDate?: string;
 }) {
   await requireAdmin();
-  const supabase = createAdminClient();
+  const supabase = await createServerClient();
 
   const { data, error } = await supabase.rpc("get_orders_stats", {
     cafe_id_param: options?.cafeId || null,
