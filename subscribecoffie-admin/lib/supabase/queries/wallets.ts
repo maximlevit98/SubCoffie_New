@@ -226,18 +226,7 @@ export async function listWallets() {
       lifetime_top_up_credits,
       cafe_id,
       network_id,
-      created_at,
-      profiles:user_id (
-        id,
-        full_name,
-        phone
-      ),
-      cafes:cafe_id (
-        name
-      ),
-      wallet_networks:network_id (
-        name
-      )
+      created_at
     `
     )
     .order("created_at", { ascending: false });
@@ -245,6 +234,32 @@ export async function listWallets() {
   if (error || !data) {
     return { data: null, error: error?.message };
   }
+
+  // Fetch profiles separately
+  const userIds = [...new Set(data.map(w => w.user_id))];
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, full_name, phone")
+    .in("id", userIds);
+
+  // Fetch cafes
+  const cafeIds = [...new Set(data.map(w => w.cafe_id).filter(Boolean))];
+  const { data: cafes } = cafeIds.length > 0 ? await supabase
+    .from("cafes")
+    .select("id, name")
+    .in("id", cafeIds) : { data: [] };
+
+  // Fetch networks
+  const networkIds = [...new Set(data.map(w => w.network_id).filter(Boolean))];
+  const { data: networks } = networkIds.length > 0 ? await supabase
+    .from("wallet_networks")
+    .select("id, name")
+    .in("id", networkIds) : { data: [] };
+
+  // Create lookup maps
+  const profilesMap = new Map(profiles?.map(p => [p.id, p]) || []);
+  const cafesMap = new Map(cafes?.map(c => [c.id, c]) || []);
+  const networksMap = new Map(networks?.map(n => [n.id, n]) || []);
 
   // Transform to WalletWithUser format
   const wallets: WalletWithUser[] = data.map((w: {
@@ -254,15 +269,8 @@ export async function listWallets() {
     balance_credits: number;
     lifetime_top_up_credits: number;
     cafe_id: string | null;
-    cafes?: { name: string } | null;
     network_id: string | null;
-    wallet_networks?: { name: string } | null;
     created_at: string;
-    profiles?: {
-      id: string;
-      full_name: string | null;
-      phone: string | null;
-    } | null;
   }) => ({
     id: w.id,
     user_id: w.user_id,
@@ -270,11 +278,11 @@ export async function listWallets() {
     balance_credits: w.balance_credits,
     lifetime_top_up_credits: w.lifetime_top_up_credits,
     cafe_id: w.cafe_id,
-    cafe_name: w.cafes?.name || null,
+    cafe_name: w.cafe_id ? cafesMap.get(w.cafe_id)?.name || null : null,
     network_id: w.network_id,
-    network_name: w.wallet_networks?.name || null,
+    network_name: w.network_id ? networksMap.get(w.network_id)?.name || null : null,
     created_at: w.created_at,
-    profiles: w.profiles,
+    profiles: profilesMap.get(w.user_id) || null,
   }));
 
   return { data: wallets, error: null };
@@ -404,21 +412,7 @@ export async function getWalletOverview(walletId: string) {
         cafe_id,
         network_id,
         created_at,
-        updated_at,
-        profiles:user_id (
-          email,
-          phone,
-          full_name,
-          avatar_url,
-          created_at
-        ),
-        cafes:cafe_id (
-          name,
-          address
-        ),
-        wallet_networks:network_id (
-          name
-        )
+        updated_at
       `)
       .eq("id", walletId)
       .single();
@@ -427,11 +421,18 @@ export async function getWalletOverview(walletId: string) {
       return { data: null, error: walletError?.message || "Wallet not found" };
     }
 
+    // Fetch related data separately
+    const [
+      { data: profileData },
+      { data: cafeData },
+      { data: networkData }
+    ] = await Promise.all([
+      supabase.from("profiles").select("email, phone, full_name, avatar_url, created_at").eq("id", walletData.user_id).single(),
+      walletData.cafe_id ? supabase.from("cafes").select("name, address").eq("id", walletData.cafe_id).single() : Promise.resolve({ data: null }),
+      walletData.network_id ? supabase.from("wallet_networks").select("name").eq("id", walletData.network_id).single() : Promise.resolve({ data: null })
+    ]);
+
     // Construct overview from available data
-    const profiles = walletData.profiles as { email?: string; phone?: string; full_name?: string; avatar_url?: string; created_at?: string } | null;
-    const cafes = walletData.cafes as { name?: string; address?: string } | null;
-    const networks = walletData.wallet_networks as { name?: string } | null;
-    
     const overview: AdminWalletOverview = {
       wallet_id: walletData.id,
       user_id: walletData.user_id,
@@ -440,16 +441,16 @@ export async function getWalletOverview(walletId: string) {
       lifetime_top_up_credits: walletData.lifetime_top_up_credits,
       created_at: walletData.created_at,
       updated_at: walletData.updated_at,
-      user_email: profiles?.email || null,
-      user_phone: profiles?.phone || null,
-      user_full_name: profiles?.full_name || null,
-      user_avatar_url: profiles?.avatar_url || null,
-      user_registered_at: profiles?.created_at || walletData.created_at,
+      user_email: profileData?.email || null,
+      user_phone: profileData?.phone || null,
+      user_full_name: profileData?.full_name || null,
+      user_avatar_url: profileData?.avatar_url || null,
+      user_registered_at: profileData?.created_at || walletData.created_at,
       cafe_id: walletData.cafe_id,
-      cafe_name: cafes?.name || null,
-      cafe_address: cafes?.address || null,
+      cafe_name: cafeData?.name || null,
+      cafe_address: cafeData?.address || null,
       network_id: walletData.network_id,
-      network_name: networks?.name || null,
+      network_name: networkData?.name || null,
       total_transactions: 0,
       total_topups: 0,
       total_payments: 0,
