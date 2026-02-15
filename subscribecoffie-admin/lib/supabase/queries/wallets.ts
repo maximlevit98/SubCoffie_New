@@ -58,6 +58,93 @@ export type WalletTransaction = {
   created_at: string;
 };
 
+// Admin RPC types for detail page
+export type AdminWalletOverview = {
+  wallet_id: string;
+  user_id: string;
+  wallet_type: "citypass" | "cafe_wallet";
+  balance_credits: number;
+  lifetime_top_up_credits: number;
+  created_at: string;
+  updated_at: string;
+  user_email: string | null;
+  user_phone: string | null;
+  user_full_name: string | null;
+  user_avatar_url: string | null;
+  user_registered_at: string;
+  cafe_id: string | null;
+  cafe_name: string | null;
+  cafe_address: string | null;
+  network_id: string | null;
+  network_name: string | null;
+  total_transactions: number;
+  total_topups: number;
+  total_payments: number;
+  total_refunds: number;
+  total_orders: number;
+  completed_orders: number;
+  last_transaction_at: string | null;
+  last_payment_at: string | null;
+  last_order_at: string | null;
+};
+
+export type AdminWalletTransaction = {
+  transaction_id: string;
+  wallet_id: string;
+  amount: number;
+  type: string;
+  description: string | null;
+  order_id: string | null;
+  order_number: string | null;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  actor_full_name: string | null;
+  balance_before: number;
+  balance_after: number;
+  created_at: string;
+};
+
+export type AdminWalletPayment = {
+  payment_id: string;
+  wallet_id: string;
+  order_id: string | null;
+  order_number: string | null;
+  amount_credits: number;
+  commission_credits: number;
+  net_amount: number;
+  transaction_type: string;
+  payment_method_id: string | null;
+  status: string;
+  provider_transaction_id: string | null;
+  idempotency_key: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type AdminWalletOrder = {
+  order_id: string;
+  order_number: string;
+  created_at: string;
+  status: string;
+  cafe_id: string;
+  cafe_name: string | null;
+  subtotal_credits: number;
+  paid_credits: number;
+  bonus_used: number;
+  payment_method: string | null;
+  payment_status: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  items: Array<{
+    item_id: string;
+    item_name: string;
+    qty: number;
+    unit_price_credits: number;
+    line_total_credits: number;
+    modifiers: unknown;
+  }> | null;
+};
+
 /**
  * Получает все кошельки через admin RPC (с поиском, пагинацией, activity)
  * UPDATED: 2026-02-14 - Uses admin_get_wallets RPC
@@ -245,4 +332,95 @@ export async function getWalletsStats() {
   };
 
   return { data: stats, error: null };
+}
+
+/**
+ * Получает детальный обзор кошелька через admin RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_overview RPC
+ */
+export async function getWalletOverview(walletId: string) {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase.rpc("admin_get_wallet_overview", {
+    p_wallet_id: walletId,
+  });
+
+  if (error) {
+    return { data: null, error: error.message };
+  }
+
+  // RPC returns single row as array, take first element
+  return { data: (data?.[0] as AdminWalletOverview) || null, error: null };
+}
+
+/**
+ * Получает транзакции кошелька через admin RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_transactions RPC
+ */
+export async function getWalletTransactionsAdmin(
+  walletId: string,
+  limit: number = 50,
+  offset: number = 0
+) {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase.rpc("admin_get_wallet_transactions", {
+    p_wallet_id: walletId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+
+  if (error) {
+    return { data: null, error: error.message };
+  }
+
+  return { data: data as AdminWalletTransaction[] | null, error: null };
+}
+
+/**
+ * Получает платежи кошелька через admin RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_payments RPC
+ */
+export async function getWalletPayments(
+  walletId: string,
+  limit: number = 50,
+  offset: number = 0
+) {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase.rpc("admin_get_wallet_payments", {
+    p_wallet_id: walletId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+
+  if (error) {
+    return { data: null, error: error.message };
+  }
+
+  return { data: data as AdminWalletPayment[] | null, error: null };
+}
+
+/**
+ * Получает заказы кошелька через admin RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_orders RPC
+ */
+export async function getWalletOrders(
+  walletId: string,
+  limit: number = 50,
+  offset: number = 0
+) {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase.rpc("admin_get_wallet_orders", {
+    p_wallet_id: walletId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+
+  if (error) {
+    return { data: null, error: error.message };
+  }
+
+  return { data: data as AdminWalletOrder[] | null, error: null };
 }
