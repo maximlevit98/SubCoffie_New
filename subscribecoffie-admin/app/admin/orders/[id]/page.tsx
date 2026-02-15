@@ -204,7 +204,7 @@ export default async function OrderDetailsPage({
                       {order.wallet_id.slice(0, 8)}...
                     </span>
                     <Link
-                      href={`/admin/wallets/${order.user_id || userProfile?.id}`}
+                      href={`/admin/wallets/${order.wallet_id}`}
                       className="text-xs text-emerald-600 hover:text-emerald-700 underline"
                     >
                       Открыть →

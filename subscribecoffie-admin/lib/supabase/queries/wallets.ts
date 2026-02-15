@@ -44,6 +44,13 @@ export type AdminWallet = {
   total_transactions: number;
   total_payments: number;
   total_orders: number;
+  total_topups: number;
+  total_refunds: number;
+  total_topup_credits: number;
+  total_spent_credits: number;
+  total_refund_credits: number;
+  net_wallet_change_credits: number;
+  total_orders_paid_credits: number;
 };
 
 export type WalletTransaction = {
@@ -86,6 +93,15 @@ export type AdminWalletOverview = {
   last_transaction_at: string | null;
   last_payment_at: string | null;
   last_order_at: string | null;
+  total_topup_credits: number;
+  total_payment_credits: number;
+  total_refund_credits: number;
+  total_adjustment_credits: number;
+  net_wallet_change_credits: number;
+  total_orders_paid_credits: number;
+  avg_order_paid_credits: number;
+  last_topup_at: string | null;
+  last_refund_at: string | null;
 };
 
 export type AdminWalletTransaction = {
@@ -196,6 +212,13 @@ export async function listWalletsAdmin(options?: {
       total_transactions: 0,
       total_payments: 0,
       total_orders: 0,
+      total_topups: 0,
+      total_refunds: 0,
+      total_topup_credits: w.lifetime_top_up_credits || 0,
+      total_spent_credits: 0,
+      total_refund_credits: 0,
+      net_wallet_change_credits: w.balance_credits || 0,
+      total_orders_paid_credits: 0,
     }));
     
     return { data: adminWallets, error: null };
@@ -460,6 +483,15 @@ export async function getWalletOverview(walletId: string) {
       last_transaction_at: null,
       last_payment_at: null,
       last_order_at: null,
+      total_topup_credits: walletData.lifetime_top_up_credits,
+      total_payment_credits: 0,
+      total_refund_credits: 0,
+      total_adjustment_credits: 0,
+      net_wallet_change_credits: walletData.balance_credits,
+      total_orders_paid_credits: 0,
+      avg_order_paid_credits: 0,
+      last_topup_at: null,
+      last_refund_at: null,
     };
 
     return { data: overview, error: null };

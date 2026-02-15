@@ -112,11 +112,41 @@ export function OverviewTab({ overview }: OverviewTabProps) {
           <div>
             <p className="text-xs text-zinc-500 mb-1">Средний чек</p>
             <p className="text-xl font-semibold text-zinc-700">
-              {overview.total_orders > 0 
-                ? Math.round(overview.lifetime_top_up_credits / overview.total_orders)
-                : 0} кр.
+              {overview.avg_order_paid_credits} кр.
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Financial Summary */}
+      <div className="rounded-lg border border-zinc-200 bg-white p-6">
+        <h3 className="text-lg font-semibold mb-4">Финансовая сводка</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+          <FinanceCell
+            label="Пополнено"
+            value={overview.total_topup_credits}
+            tone="emerald"
+          />
+          <FinanceCell
+            label="Списано"
+            value={overview.total_payment_credits}
+            tone="red"
+          />
+          <FinanceCell
+            label="Возвраты"
+            value={overview.total_refund_credits}
+            tone="violet"
+          />
+          <FinanceCell
+            label="Корректировки"
+            value={overview.total_adjustment_credits}
+            tone={overview.total_adjustment_credits >= 0 ? "emerald" : "red"}
+          />
+          <FinanceCell
+            label="Net поток"
+            value={overview.net_wallet_change_credits}
+            tone={overview.net_wallet_change_credits >= 0 ? "emerald" : "red"}
+          />
         </div>
       </div>
 
@@ -189,6 +219,24 @@ export function OverviewTab({ overview }: OverviewTabProps) {
                 </p>
               </div>
             )}
+
+            {overview.last_topup_at && (
+              <div>
+                <p className="text-xs text-zinc-500 mb-1">Последнее пополнение</p>
+                <p className="text-sm text-zinc-900">
+                  {new Date(overview.last_topup_at).toLocaleString("ru-RU")}
+                </p>
+              </div>
+            )}
+
+            {overview.last_refund_at && (
+              <div>
+                <p className="text-xs text-zinc-500 mb-1">Последний возврат</p>
+                <p className="text-sm text-zinc-900">
+                  {new Date(overview.last_refund_at).toLocaleString("ru-RU")}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -250,6 +298,29 @@ function StatCard({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function FinanceCell({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "emerald" | "red" | "violet";
+}) {
+  const styles = {
+    emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    red: "bg-red-50 text-red-700 border-red-200",
+    violet: "bg-violet-50 text-violet-700 border-violet-200",
+  };
+
+  return (
+    <div className={`rounded-md border px-3 py-3 ${styles[tone]}`}>
+      <p className="text-xs opacity-80">{label}</p>
+      <p className="text-lg font-semibold mt-1">{value} кр.</p>
     </div>
   );
 }

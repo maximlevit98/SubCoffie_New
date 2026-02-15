@@ -32,8 +32,7 @@ export function WalletDetailClient({
   const [transactionsPage, setTransactionsPage] = useState(1);
   const [paymentsPage, setPaymentsPage] = useState(1);
   const [ordersPage, setOrdersPage] = useState(1);
-  
-  const limit = 50;
+  const pageSize = 50;
 
   const tabs: Array<{ id: Tab; label: string; count?: number; icon: string }> = [
     { id: "overview", label: "Обзор", icon: "📊" },
@@ -115,8 +114,7 @@ export function WalletDetailClient({
           <TransactionsTab
             transactions={transactions}
             currentPage={transactionsPage}
-            limit={limit}
-            hasMore={transactions.length === limit}
+            hasMore={transactions.length === pageSize}
             onPageChange={(page) => {
               setTransactionsPage(page);
               // TODO: Fetch new data when pagination is implemented server-side
@@ -128,8 +126,7 @@ export function WalletDetailClient({
           <PaymentsTab
             payments={payments}
             currentPage={paymentsPage}
-            limit={limit}
-            hasMore={payments.length === limit}
+            hasMore={payments.length === pageSize}
             onPageChange={(page) => {
               setPaymentsPage(page);
               // TODO: Fetch new data when pagination is implemented server-side
@@ -141,8 +138,7 @@ export function WalletDetailClient({
           <OrdersTab
             orders={orders}
             currentPage={ordersPage}
-            limit={limit}
-            hasMore={orders.length === limit}
+            hasMore={orders.length === pageSize}
             onPageChange={(page) => {
               setOrdersPage(page);
               // TODO: Fetch new data when pagination is implemented server-side

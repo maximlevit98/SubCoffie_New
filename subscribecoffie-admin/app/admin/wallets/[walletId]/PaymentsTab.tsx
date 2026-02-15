@@ -187,6 +187,7 @@ export function PaymentsTab({
 function TransactionTypeBadge({ type }: { type: string }) {
   const config: Record<string, { label: string; color: string }> = {
     topup: { label: "Пополнение", color: "bg-green-100 text-green-700" },
+    order_payment: { label: "Оплата заказа", color: "bg-blue-100 text-blue-700" },
     payment: { label: "Оплата", color: "bg-blue-100 text-blue-700" },
     refund: { label: "Возврат", color: "bg-purple-100 text-purple-700" },
   };

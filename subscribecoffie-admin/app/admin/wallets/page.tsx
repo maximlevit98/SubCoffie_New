@@ -148,7 +148,7 @@ export default async function WalletsPage({ searchParams }: WalletsPageProps) {
                   Последняя активность
                 </th>
                 <th className="px-4 py-3 text-center text-xs font-medium text-zinc-500 uppercase tracking-wider">
-                  Активность
+                  Статистика
                 </th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 uppercase tracking-wider">
                   Действия
@@ -282,22 +282,36 @@ function WalletRow({ wallet }: { wallet: AdminWallet }) {
 
       {/* Activity Stats */}
       <td className="px-4 py-3">
-        <div className="flex flex-col gap-0.5 text-xs text-zinc-600">
-          <div className="flex items-center justify-center gap-1">
-            <span className="text-zinc-400">Тр:</span>
-            <span className="font-medium">{wallet.total_transactions}</span>
+        <div className="flex flex-col gap-1 text-xs text-zinc-600">
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-zinc-400">Поп:</span>
+            <span className="font-medium text-emerald-700">{wallet.total_topups}</span>
+            <span className="text-zinc-300">|</span>
+            <span className="text-zinc-400">Опл:</span>
+            <span className="font-medium text-blue-700">{wallet.total_payments}</span>
+            <span className="text-zinc-300">|</span>
+            <span className="text-zinc-400">Возв:</span>
+            <span className="font-medium text-purple-700">{wallet.total_refunds}</span>
           </div>
-          <div className="flex items-center justify-center gap-1">
+          <div className="flex items-center justify-center gap-2 text-[11px]">
+            <span className="text-zinc-400">+{wallet.total_topup_credits} кр.</span>
+            <span className="text-zinc-300">/</span>
+            <span className="text-zinc-400">−{wallet.total_spent_credits} кр.</span>
+          </div>
+          <div className="flex items-center justify-center gap-1 text-[11px]">
             <span className="text-zinc-400">Зак:</span>
             <span className="font-medium">{wallet.total_orders}</span>
+            <span className="text-zinc-300">•</span>
+            <span className="text-zinc-400">Оплачено:</span>
+            <span className="font-medium">{wallet.total_orders_paid_credits} кр.</span>
           </div>
         </div>
       </td>
 
       {/* Actions */}
-      <td className="px-4 py-3 text-right">
+      <td className="px-4 py-3 align-bottom text-right">
         <Link
-          href={`/admin/wallets/${wallet.user_id}`}
+          href={`/admin/wallets/${wallet.wallet_id}`}
           className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 hover:border-zinc-400 transition-colors"
         >
           Детали

@@ -132,7 +132,7 @@ function OrderCard({ order }: { order: AdminWalletOrder }) {
                     </span>
                   </div>
                   
-                  {item.modifiers && (
+                  {Boolean(item.modifiers) && (
                     <div className="text-xs text-zinc-500 mt-1">
                       <ModifiersDisplay modifiers={item.modifiers} />
                     </div>
@@ -259,11 +259,37 @@ function ModifiersDisplay({ modifiers }: { modifiers: unknown }) {
 
   return (
     <div className="flex flex-wrap gap-1">
-      {modArray.map((mod: { name?: string; value?: string }, idx: number) => (
+      {modArray.map((mod, idx) => (
         <span key={idx} className="inline-block px-1.5 py-0.5 bg-zinc-100 rounded text-xs">
-          {mod.name || mod.value || JSON.stringify(mod)}
+          {formatModifier(mod)}
         </span>
       ))}
     </div>
   );
+}
+
+function formatModifier(modifier: unknown): string {
+  if (modifier === null || modifier === undefined) {
+    return "—";
+  }
+
+  if (typeof modifier === "string" || typeof modifier === "number" || typeof modifier === "boolean") {
+    return String(modifier);
+  }
+
+  if (typeof modifier === "object") {
+    const obj = modifier as Record<string, unknown>;
+    const named = obj.name;
+    const valued = obj.value;
+
+    if (typeof named === "string" && named.length > 0) {
+      return named;
+    }
+
+    if (typeof valued === "string" && valued.length > 0) {
+      return valued;
+    }
+  }
+
+  return JSON.stringify(modifier) ?? String(modifier);
 }
