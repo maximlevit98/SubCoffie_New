@@ -4,21 +4,22 @@ import { getOrderDetails } from "../actions";
 import { OrderStatusButtons } from "./OrderStatusButtons";
 
 type OrderDetailsPageProps = {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 };
 
 export default async function OrderDetailsPage({
   params,
 }: OrderDetailsPageProps) {
+  const { id } = await params;
   let orderData: any;
   let error: string | null = null;
 
   try {
-    orderData = await getOrderDetails(params.id);
-  } catch (e: any) {
-    error = e.message;
+    orderData = await getOrderDetails(id);
+  } catch (e: unknown) {
+    error = e instanceof Error ? e.message : "Unknown error";
   }
 
   if (error || !orderData) {

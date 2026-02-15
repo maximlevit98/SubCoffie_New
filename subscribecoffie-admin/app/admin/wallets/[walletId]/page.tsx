@@ -8,6 +8,7 @@ import {
   getWalletPayments,
   getWalletOrders,
 } from "../../../../lib/supabase/queries/wallets";
+import { requireAdmin } from "../../../../lib/supabase/roles";
 import { WalletDetailClient } from "./WalletDetailClient";
 
 type WalletDetailsPageProps = {
@@ -21,6 +22,16 @@ export default async function WalletDetailsPage({
 }: WalletDetailsPageProps) {
   const { walletId: identifier } = await params;
   let error: string | null = null;
+
+  try {
+    await requireAdmin();
+  } catch (e: unknown) {
+    error = e instanceof Error ? e.message : "Admin access required";
+  }
+
+  if (error) {
+    return renderErrorState(error);
+  }
 
   // Primary path: identifier is wallet_id
   const { data: directOverview, error: directOverviewError } = await getWalletOverview(identifier);

@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { listWalletsAdmin, getWalletsStats, type AdminWallet } from "../../../lib/supabase/queries/wallets";
+import { requireAdmin } from "../../../lib/supabase/roles";
 import { WalletsFilters } from "./WalletsFilters";
 import { WalletStatsCards } from "./WalletStatsCards";
 
@@ -28,6 +29,8 @@ export default async function WalletsPage({ searchParams }: WalletsPageProps) {
   let error: string | null = null;
 
   try {
+    await requireAdmin();
+
     const [walletsResult, statsResult] = await Promise.all([
       listWalletsAdmin({
         limit,

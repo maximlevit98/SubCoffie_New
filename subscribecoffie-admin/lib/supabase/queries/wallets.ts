@@ -1,4 +1,5 @@
 import { createServerClient } from "../server";
+import { createAdminClient } from "../admin";
 
 // CANONICAL SCHEMA (updated 2026-02-05 P4 - Multiple wallets support)
 export type Wallet = {
@@ -379,7 +380,7 @@ export async function getWalletTransactions(
  * TODO: Create new RPC with canonical schema if needed
  */
 export async function getWalletsStats() {
-  const supabase = await createServerClient();
+  const supabase = createAdminClient();
 
   // Direct aggregation query
   const { data, error } = await supabase
