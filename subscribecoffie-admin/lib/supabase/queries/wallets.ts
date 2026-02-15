@@ -147,7 +147,7 @@ export type AdminWalletOrder = {
 
 /**
  * Получает все кошельки через admin RPC (с поиском, пагинацией, activity)
- * UPDATED: 2026-02-14 - Uses admin_get_wallets RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallets RPC with fallback
  */
 export async function listWalletsAdmin(options?: {
   limit?: number;
@@ -161,6 +161,41 @@ export async function listWalletsAdmin(options?: {
     p_offset: options?.offset || 0,
     p_search: options?.search || null,
   });
+
+  // Fallback to legacy listWallets if RPC doesn't exist
+  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
+    console.warn("admin_get_wallets RPC not found, falling back to legacy listWallets()");
+    const legacyResult = await listWallets();
+    
+    if (legacyResult.error) {
+      return { data: null, error: legacyResult.error };
+    }
+    
+    // Transform to AdminWallet format
+    const adminWallets: AdminWallet[] = (legacyResult.data || []).map(w => ({
+      wallet_id: w.id,
+      user_id: w.user_id,
+      wallet_type: w.wallet_type,
+      balance_credits: w.balance_credits,
+      lifetime_top_up_credits: w.lifetime_top_up_credits,
+      created_at: w.created_at,
+      user_email: null,
+      user_phone: w.profiles?.phone || null,
+      user_full_name: w.profiles?.full_name || null,
+      cafe_id: w.cafe_id,
+      cafe_name: w.cafe_name,
+      network_id: w.network_id,
+      network_name: w.network_name,
+      last_transaction_at: null,
+      last_payment_at: null,
+      last_order_at: null,
+      total_transactions: 0,
+      total_payments: 0,
+      total_orders: 0,
+    }));
+    
+    return { data: adminWallets, error: null };
+  }
 
   if (error) {
     return { data: null, error: error.message };
@@ -336,7 +371,7 @@ export async function getWalletsStats() {
 
 /**
  * Получает детальный обзор кошелька через admin RPC
- * UPDATED: 2026-02-14 - Uses admin_get_wallet_overview RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_overview RPC with fallback
  */
 export async function getWalletOverview(walletId: string) {
   const supabase = createAdminClient();
@@ -344,6 +379,82 @@ export async function getWalletOverview(walletId: string) {
   const { data, error } = await supabase.rpc("admin_get_wallet_overview", {
     p_wallet_id: walletId,
   });
+
+  // Fallback: construct from available data
+  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
+    console.warn("admin_get_wallet_overview RPC not found, using fallback");
+    
+    // Get basic wallet info
+    const { data: walletData, error: walletError } = await supabase
+      .from("wallets")
+      .select(`
+        id,
+        user_id,
+        wallet_type,
+        balance_credits,
+        lifetime_top_up_credits,
+        cafe_id,
+        network_id,
+        created_at,
+        updated_at,
+        profiles:user_id (
+          email,
+          phone,
+          full_name,
+          avatar_url,
+          created_at
+        ),
+        cafes:cafe_id (
+          name,
+          address
+        ),
+        wallet_networks:network_id (
+          name
+        )
+      `)
+      .eq("id", walletId)
+      .single();
+
+    if (walletError || !walletData) {
+      return { data: null, error: walletError?.message || "Wallet not found" };
+    }
+
+    // Construct overview from available data
+    const profiles = walletData.profiles as { email?: string; phone?: string; full_name?: string; avatar_url?: string; created_at?: string } | null;
+    const cafes = walletData.cafes as { name?: string; address?: string } | null;
+    const networks = walletData.wallet_networks as { name?: string } | null;
+    
+    const overview: AdminWalletOverview = {
+      wallet_id: walletData.id,
+      user_id: walletData.user_id,
+      wallet_type: walletData.wallet_type as "citypass" | "cafe_wallet",
+      balance_credits: walletData.balance_credits,
+      lifetime_top_up_credits: walletData.lifetime_top_up_credits,
+      created_at: walletData.created_at,
+      updated_at: walletData.updated_at,
+      user_email: profiles?.email || null,
+      user_phone: profiles?.phone || null,
+      user_full_name: profiles?.full_name || null,
+      user_avatar_url: profiles?.avatar_url || null,
+      user_registered_at: profiles?.created_at || walletData.created_at,
+      cafe_id: walletData.cafe_id,
+      cafe_name: cafes?.name || null,
+      cafe_address: cafes?.address || null,
+      network_id: walletData.network_id,
+      network_name: networks?.name || null,
+      total_transactions: 0,
+      total_topups: 0,
+      total_payments: 0,
+      total_refunds: 0,
+      total_orders: 0,
+      completed_orders: 0,
+      last_transaction_at: null,
+      last_payment_at: null,
+      last_order_at: null,
+    };
+
+    return { data: overview, error: null };
+  }
 
   if (error) {
     return { data: null, error: error.message };
@@ -355,7 +466,7 @@ export async function getWalletOverview(walletId: string) {
 
 /**
  * Получает транзакции кошелька через admin RPC
- * UPDATED: 2026-02-14 - Uses admin_get_wallet_transactions RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_transactions RPC with fallback
  */
 export async function getWalletTransactionsAdmin(
   walletId: string,
@@ -370,6 +481,35 @@ export async function getWalletTransactionsAdmin(
     p_offset: offset,
   });
 
+  // Fallback to legacy getWalletTransactions
+  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
+    console.warn("admin_get_wallet_transactions RPC not found, using fallback");
+    const legacyResult = await getWalletTransactions(walletId, limit, offset);
+    
+    if (legacyResult.error) {
+      return { data: null, error: legacyResult.error };
+    }
+    
+    // Transform to AdminWalletTransaction format
+    const adminTransactions: AdminWalletTransaction[] = (legacyResult.data || []).map(tx => ({
+      transaction_id: tx.id,
+      wallet_id: tx.wallet_id,
+      amount: tx.amount,
+      type: tx.type,
+      description: tx.description,
+      order_id: tx.order_id,
+      order_number: null,
+      actor_user_id: null,
+      actor_email: null,
+      actor_full_name: null,
+      balance_before: tx.balance_before,
+      balance_after: tx.balance_after,
+      created_at: tx.created_at,
+    }));
+    
+    return { data: adminTransactions, error: null };
+  }
+
   if (error) {
     return { data: null, error: error.message };
   }
@@ -379,7 +519,7 @@ export async function getWalletTransactionsAdmin(
 
 /**
  * Получает платежи кошелька через admin RPC
- * UPDATED: 2026-02-14 - Uses admin_get_wallet_payments RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_payments RPC with fallback
  */
 export async function getWalletPayments(
   walletId: string,
@@ -394,6 +534,12 @@ export async function getWalletPayments(
     p_offset: offset,
   });
 
+  // Fallback: return empty array (payment_transactions might not exist)
+  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
+    console.warn("admin_get_wallet_payments RPC not found, returning empty array");
+    return { data: [], error: null };
+  }
+
   if (error) {
     return { data: null, error: error.message };
   }
@@ -403,7 +549,7 @@ export async function getWalletPayments(
 
 /**
  * Получает заказы кошелька через admin RPC
- * UPDATED: 2026-02-14 - Uses admin_get_wallet_orders RPC
+ * UPDATED: 2026-02-14 - Uses admin_get_wallet_orders RPC with fallback
  */
 export async function getWalletOrders(
   walletId: string,
@@ -417,6 +563,12 @@ export async function getWalletOrders(
     p_limit: limit,
     p_offset: offset,
   });
+
+  // Fallback: return empty array (orders_core might not have this structure)
+  if (error && error.message?.includes("function") && error.message?.includes("does not exist")) {
+    console.warn("admin_get_wallet_orders RPC not found, returning empty array");
+    return { data: [], error: null };
+  }
 
   if (error) {
     return { data: null, error: error.message };
