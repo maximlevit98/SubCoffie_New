@@ -23,6 +23,29 @@ export type WalletWithUser = Wallet & {
   } | null;
 };
 
+// Admin RPC wallet type (from admin_get_wallets)
+export type AdminWallet = {
+  wallet_id: string;
+  user_id: string;
+  wallet_type: "citypass" | "cafe_wallet";
+  balance_credits: number;
+  lifetime_top_up_credits: number;
+  created_at: string;
+  user_email: string | null;
+  user_phone: string | null;
+  user_full_name: string | null;
+  cafe_id: string | null;
+  cafe_name: string | null;
+  network_id: string | null;
+  network_name: string | null;
+  last_transaction_at: string | null;
+  last_payment_at: string | null;
+  last_order_at: string | null;
+  total_transactions: number;
+  total_payments: number;
+  total_orders: number;
+};
+
 export type WalletTransaction = {
   id: string;
   wallet_id: string;
@@ -36,8 +59,32 @@ export type WalletTransaction = {
 };
 
 /**
- * Получает все кошельки с информацией о пользователях
- * UPDATED: 2026-02-05 P4 - Returns multiple wallets per user
+ * Получает все кошельки через admin RPC (с поиском, пагинацией, activity)
+ * UPDATED: 2026-02-14 - Uses admin_get_wallets RPC
+ */
+export async function listWalletsAdmin(options?: {
+  limit?: number;
+  offset?: number;
+  search?: string;
+}) {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase.rpc("admin_get_wallets", {
+    p_limit: options?.limit || 50,
+    p_offset: options?.offset || 0,
+    p_search: options?.search || null,
+  });
+
+  if (error) {
+    return { data: null, error: error.message };
+  }
+
+  return { data: data as AdminWallet[] | null, error: null };
+}
+
+/**
+ * Получает все кошельки с информацией о пользователях (LEGACY - direct query)
+ * DEPRECATED: Use listWalletsAdmin for list views
  */
 export async function listWallets() {
   const supabase = createAdminClient();
@@ -74,10 +121,26 @@ export async function listWallets() {
   }
 
   // Transform to WalletWithUser format
-  const wallets: WalletWithUser[] = data.map((w: any) => ({
+  const wallets: WalletWithUser[] = data.map((w: {
+    id: string;
+    user_id: string;
+    wallet_type: string;
+    balance_credits: number;
+    lifetime_top_up_credits: number;
+    cafe_id: string | null;
+    cafes?: { name: string } | null;
+    network_id: string | null;
+    wallet_networks?: { name: string } | null;
+    created_at: string;
+    profiles?: {
+      id: string;
+      full_name: string | null;
+      phone: string | null;
+    } | null;
+  }) => ({
     id: w.id,
     user_id: w.user_id,
-    wallet_type: w.wallet_type,
+    wallet_type: w.wallet_type as "citypass" | "cafe_wallet",
     balance_credits: w.balance_credits,
     lifetime_top_up_credits: w.lifetime_top_up_credits,
     cafe_id: w.cafe_id,
@@ -107,9 +170,19 @@ export async function getWalletsByUserId(userId: string): Promise<{ data: Wallet
   }
 
   // Transform RPC response to Wallet type
-  const wallets: Wallet[] = (data || []).map((w: any) => ({
+  const wallets: Wallet[] = (data || []).map((w: {
+    id: string;
+    wallet_type: string;
+    balance_credits: number;
+    lifetime_top_up_credits: number;
+    cafe_id: string | null;
+    cafe_name: string | null;
+    network_id: string | null;
+    network_name: string | null;
+    created_at: string;
+  }) => ({
     id: w.id,
-    wallet_type: w.wallet_type,
+    wallet_type: w.wallet_type as "citypass" | "cafe_wallet",
     balance_credits: w.balance_credits,
     lifetime_top_up_credits: w.lifetime_top_up_credits,
     cafe_id: w.cafe_id,
