@@ -615,15 +615,28 @@ export async function getWalletOrders(
     p_offset: offset,
   });
 
-  // Fallback: return empty array (orders_core might not have this structure)
+  // If wallet-specific orders are empty, fallback to user order history.
+  if (!error && (!data || data.length === 0)) {
+    const fallback = await getOrdersByWalletOwner(walletId, limit, offset);
+    if (fallback.error) {
+      return { data: null, error: fallback.error };
+    }
+    return { data: fallback.data, error: null };
+  }
+
+  // Fallback: query user orders directly when RPC unavailable.
   if (error && (
     (error.message?.includes("function") && error.message?.includes("does not exist")) ||
     error.message?.includes("Admin access required") ||
     error.message?.includes("Unauthorized") ||
     error.message?.includes("does not exist") // table might not exist
   )) {
-    console.warn("admin_get_wallet_orders RPC error, returning empty array:", error.message);
-    return { data: [], error: null };
+    console.warn("admin_get_wallet_orders RPC error, using owner-orders fallback:", error.message);
+    const fallback = await getOrdersByWalletOwner(walletId, limit, offset);
+    if (fallback.error) {
+      return { data: null, error: fallback.error };
+    }
+    return { data: fallback.data, error: null };
   }
 
   if (error) {
@@ -631,4 +644,126 @@ export async function getWalletOrders(
   }
 
   return { data: data as AdminWalletOrder[] | null, error: null };
+}
+
+async function getOrdersByWalletOwner(
+  walletId: string,
+  limit: number,
+  offset: number
+): Promise<{ data: AdminWalletOrder[]; error: string | null }> {
+  const admin = createAdminClient();
+
+  const { data: wallet, error: walletError } = await admin
+    .from("wallets")
+    .select("user_id")
+    .eq("id", walletId)
+    .maybeSingle();
+
+  if (walletError) {
+    return { data: [], error: walletError.message };
+  }
+
+  if (!wallet?.user_id) {
+    return { data: [], error: null };
+  }
+
+  const { data: orders, error: ordersError } = await admin
+    .from("orders_core")
+    .select(`
+      id,
+      order_number,
+      created_at,
+      status,
+      cafe_id,
+      subtotal_credits,
+      paid_credits,
+      bonus_used,
+      payment_method,
+      payment_status,
+      customer_name,
+      customer_phone,
+      cafes(name),
+      order_items(
+        id,
+        item_name,
+        quantity,
+        unit_credits,
+        total_price_credits,
+        modifiers
+      )
+    `)
+    .eq("user_id", wallet.user_id)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (ordersError) {
+    return { data: [], error: ordersError.message };
+  }
+
+  type OwnerOrderItemRow = {
+    id: string;
+    item_name: string | null;
+    quantity: number | null;
+    unit_credits: number | null;
+    total_price_credits: number | null;
+    modifiers: unknown;
+  };
+
+  type OwnerOrderRow = {
+    id: string;
+    order_number: string | null;
+    created_at: string;
+    status: string;
+    cafe_id: string;
+    subtotal_credits: number | null;
+    paid_credits: number | null;
+    bonus_used: number | null;
+    payment_method: string | null;
+    payment_status: string | null;
+    customer_name: string | null;
+    customer_phone: string | null;
+    cafes: { name: string | null } | null;
+    order_items: OwnerOrderItemRow[] | null;
+  };
+
+  const rows = (orders || []) as OwnerOrderRow[];
+
+  const mapped: AdminWalletOrder[] = rows.map((order) => {
+    const cafeRelation = order.cafes as unknown;
+    const cafeName = Array.isArray(cafeRelation)
+      ? (cafeRelation[0] as { name?: string | null } | undefined)?.name || null
+      : (cafeRelation as { name?: string | null } | null)?.name || null;
+
+    return {
+      order_id: order.id,
+      order_number: order.order_number || order.id.slice(0, 8),
+      created_at: order.created_at,
+      status: order.status,
+      cafe_id: order.cafe_id,
+      cafe_name: cafeName,
+      subtotal_credits: order.subtotal_credits || 0,
+      paid_credits: order.paid_credits || 0,
+      bonus_used: order.bonus_used || 0,
+      payment_method: order.payment_method || null,
+      payment_status: order.payment_status || null,
+      customer_name: order.customer_name || null,
+      customer_phone: order.customer_phone || null,
+      items: (order.order_items || []).map((item) => {
+        const qty = item.quantity || 1;
+        const unit = item.unit_credits || 0;
+        const line = item.total_price_credits ?? unit * qty;
+
+        return {
+          item_id: item.id,
+          item_name: item.item_name || "Позиция",
+          qty,
+          unit_price_credits: unit,
+          line_total_credits: line,
+          modifiers: item.modifiers ?? null,
+        };
+      }),
+    };
+  });
+
+  return { data: mapped, error: null };
 }
