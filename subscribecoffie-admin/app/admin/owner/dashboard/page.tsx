@@ -1,8 +1,30 @@
 import { createServerClient } from '@/lib/supabase/server';
 import { getUserRole } from '@/lib/supabase/roles';
+import { getOwnerWalletsStats } from '@/lib/supabase/queries/owner-wallets';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { OwnerSidebar } from '@/components/OwnerSidebar';
+
+type OwnerCafeStatus = 'draft' | 'moderation' | 'published' | 'paused' | 'rejected';
+
+type OwnerCafe = {
+  id: string;
+  name: string;
+  address: string;
+  status: OwnerCafeStatus;
+};
+
+type TodayOrder = {
+  subtotal_credits: number | null;
+};
+
+type DashboardOrder = {
+  id: string;
+  status: string;
+  subtotal_credits: number | null;
+  created_at: string;
+  cafes: { name: string | null } | Array<{ name: string | null }> | null;
+};
 
 export default async function OwnerDashboardPage() {
   const { userId } = await getUserRole();
@@ -15,17 +37,19 @@ export default async function OwnerDashboardPage() {
 
   // Get owner's cafes
   const { data: cafes } = await supabase.rpc('get_owner_cafes');
+  const ownerCafes = (cafes || []) as OwnerCafe[];
 
-  const cafesCount = cafes?.length || 0;
+  const cafesCount = ownerCafes.length;
   const hasCafes = cafesCount > 0;
 
   // Get basic stats
   let todayOrders = 0;
   let todayRevenue = 0;
-  let recentOrders: any[] = [];
+  let recentOrders: DashboardOrder[] = [];
+  const { data: walletStats, error: walletStatsError } = await getOwnerWalletsStats();
 
   if (hasCafes) {
-    const cafeIds = cafes.map((cafe: any) => cafe.id);
+    const cafeIds = ownerCafes.map((cafe) => cafe.id);
 
     // Today's orders
     const today = new Date();
@@ -37,11 +61,12 @@ export default async function OwnerDashboardPage() {
       .in('cafe_id', cafeIds)
       .gte('created_at', today.toISOString());
 
-    todayOrders = ordersToday?.length || 0;
-    todayRevenue = ordersToday?.reduce(
-      (sum: number, order: any) => sum + (order.subtotal_credits || 0),
+    const todayOrdersData = (ordersToday || []) as TodayOrder[];
+    todayOrders = todayOrdersData.length;
+    todayRevenue = todayOrdersData.reduce(
+      (sum, order) => sum + (order.subtotal_credits || 0),
       0
-    ) || 0;
+    );
 
     // Recent orders
     const { data: recentOrdersData } = await supabase
@@ -51,7 +76,7 @@ export default async function OwnerDashboardPage() {
       .order('created_at', { ascending: false })
       .limit(10);
 
-    recentOrders = recentOrdersData || [];
+    recentOrders = (recentOrdersData || []) as DashboardOrder[];
   }
 
   const statusColors = {
@@ -144,6 +169,56 @@ export default async function OwnerDashboardPage() {
             </div>
           </div>
 
+          {/* Wallet Metrics */}
+          <div className="mb-8">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-zinc-900">
+                Кошельки клиентов
+              </h2>
+              <Link
+                href="/admin/owner/wallets"
+                className="text-sm font-medium text-blue-600 hover:text-blue-700"
+              >
+                Открыть раздел →
+              </Link>
+            </div>
+
+            {walletStatsError ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                <p className="text-sm text-amber-800">
+                  Не удалось загрузить метрики кошельков: {walletStatsError}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <MetricCard
+                  label="Всего кошельков"
+                  value={walletStats?.total_wallets || 0}
+                  suffix=""
+                  tone="neutral"
+                />
+                <MetricCard
+                  label="Баланс кошельков"
+                  value={walletStats?.total_balance_credits || 0}
+                  suffix="кр."
+                  tone="blue"
+                />
+                <MetricCard
+                  label="Пополнено"
+                  value={walletStats?.total_topup_credits || 0}
+                  suffix="кр."
+                  tone="green"
+                />
+                <MetricCard
+                  label="Net поток"
+                  value={walletStats?.net_wallet_change_credits || 0}
+                  suffix="кр."
+                  tone={(walletStats?.net_wallet_change_credits || 0) >= 0 ? 'green' : 'red'}
+                />
+              </div>
+            )}
+          </div>
+
           {/* Cafes Summary */}
           {hasCafes ? (
             <div className="mb-8">
@@ -159,7 +234,7 @@ export default async function OwnerDashboardPage() {
                 </Link>
               </div>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {cafes?.map((cafe: any) => (
+                {ownerCafes.map((cafe) => (
                   <div
                     key={cafe.id}
                     className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm"
@@ -241,13 +316,15 @@ export default async function OwnerDashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 bg-white">
-                    {recentOrders.map((order: any) => (
+                    {recentOrders.map((order) => (
                       <tr key={order.id} className="hover:bg-zinc-50">
                         <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-zinc-900">
                           #{order.id.slice(0, 8)}
                         </td>
                         <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600">
-                          {order.cafes?.name || 'N/A'}
+                          {Array.isArray(order.cafes)
+                            ? order.cafes[0]?.name || 'N/A'
+                            : order.cafes?.name || 'N/A'}
                         </td>
                         <td className="whitespace-nowrap px-6 py-4 text-sm">
                           <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
@@ -271,6 +348,34 @@ export default async function OwnerDashboardPage() {
           )}
         </div>
       </main>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  suffix,
+  tone,
+}: {
+  label: string;
+  value: number;
+  suffix: string;
+  tone: 'neutral' | 'blue' | 'green' | 'red';
+}) {
+  const toneStyles = {
+    neutral: 'border-zinc-200 bg-white text-zinc-900',
+    blue: 'border-blue-200 bg-blue-50 text-blue-900',
+    green: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+    red: 'border-red-200 bg-red-50 text-red-900',
+  };
+
+  return (
+    <div className={`rounded-lg border p-4 ${toneStyles[tone]}`}>
+      <p className="text-xs font-medium text-zinc-500">{label}</p>
+      <p className="mt-2 text-2xl font-bold">
+        {value.toLocaleString('ru-RU')} {suffix}
+      </p>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { type AdminWalletOrder } from "../../../../lib/supabase/queries/wallets"
 
 type OrdersTabProps = {
   orders: AdminWalletOrder[];
+  orderDetailsBaseHref?: string;
   currentPage: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -13,6 +14,7 @@ type OrdersTabProps = {
 
 export function OrdersTab({
   orders,
+  orderDetailsBaseHref = "/admin/orders",
   currentPage,
   hasMore,
   onPageChange,
@@ -40,7 +42,11 @@ export function OrdersTab({
       {/* Orders List */}
       <div className="space-y-4">
         {orders.map((order) => (
-          <OrderCard key={order.order_id} order={order} />
+          <OrderCard
+            key={order.order_id}
+            order={order}
+            orderDetailsBaseHref={orderDetailsBaseHref}
+          />
         ))}
       </div>
 
@@ -72,7 +78,13 @@ export function OrdersTab({
 }
 
 // Order Card Component
-function OrderCard({ order }: { order: AdminWalletOrder }) {
+function OrderCard({
+  order,
+  orderDetailsBaseHref,
+}: {
+  order: AdminWalletOrder;
+  orderDetailsBaseHref?: string;
+}) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
       {/* Header */}
@@ -80,12 +92,18 @@ function OrderCard({ order }: { order: AdminWalletOrder }) {
         <div className="flex items-start justify-between">
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-2">
-              <Link
-                href={`/admin/orders/${order.order_id}`}
-                className="text-lg font-semibold text-blue-600 hover:text-blue-800"
-              >
-                {order.order_number}
-              </Link>
+              {orderDetailsBaseHref ? (
+                <Link
+                  href={`${orderDetailsBaseHref}/${order.order_id}`}
+                  className="text-lg font-semibold text-blue-600 hover:text-blue-800"
+                >
+                  {order.order_number}
+                </Link>
+              ) : (
+                <span className="text-lg font-semibold text-zinc-900">
+                  {order.order_number}
+                </span>
+              )}
               <OrderStatusBadge status={order.status} />
               {order.payment_status && (
                 <PaymentStatusBadge status={order.payment_status} />

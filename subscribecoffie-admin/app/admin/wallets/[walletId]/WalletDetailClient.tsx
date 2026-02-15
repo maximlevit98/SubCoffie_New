@@ -20,6 +20,11 @@ type WalletDetailClientProps = {
   transactions: AdminWalletTransaction[];
   payments: AdminWalletPayment[];
   orders: AdminWalletOrder[];
+  title?: string;
+  backHref?: string;
+  userProfileHref?: string | null;
+  showUserProfileLink?: boolean;
+  orderDetailsBaseHref?: string;
 };
 
 export function WalletDetailClient({
@@ -27,6 +32,11 @@ export function WalletDetailClient({
   transactions,
   payments,
   orders,
+  title = "Кошелёк пользователя",
+  backHref = "/admin/wallets",
+  userProfileHref = "/admin/users",
+  showUserProfileLink = true,
+  orderDetailsBaseHref = "/admin/orders",
 }: WalletDetailClientProps) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [transactionsPage, setTransactionsPage] = useState(1);
@@ -48,7 +58,7 @@ export function WalletDetailClient({
       <div className="flex items-start justify-between">
         <div>
           <div className="flex items-center gap-3 mb-2">
-            <h2 className="text-2xl font-semibold">Кошелёк пользователя</h2>
+            <h2 className="text-2xl font-semibold">{title}</h2>
             <WalletTypeBadge type={overview.wallet_type} />
           </div>
           <div className="flex items-center gap-4 text-sm text-zinc-500">
@@ -59,14 +69,16 @@ export function WalletDetailClient({
         </div>
         
         <div className="flex items-center gap-3">
+          {showUserProfileLink && userProfileHref && (
+            <Link
+              href={userProfileHref}
+              className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-900 border border-zinc-300 rounded-md hover:bg-zinc-50"
+            >
+              Профиль пользователя
+            </Link>
+          )}
           <Link
-            href={`/admin/users`}
-            className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-900 border border-zinc-300 rounded-md hover:bg-zinc-50"
-          >
-            Профиль пользователя
-          </Link>
-          <Link
-            href="/admin/wallets"
+            href={backHref}
             className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-900 border border-zinc-300 rounded-md hover:bg-zinc-50"
           >
             ← Все кошельки
@@ -114,6 +126,7 @@ export function WalletDetailClient({
         {activeTab === "transactions" && (
           <TransactionsTab
             transactions={transactions}
+            orderDetailsBaseHref={orderDetailsBaseHref}
             currentPage={transactionsPage}
             hasMore={transactions.length === limit}
             onPageChange={(page) => {
@@ -126,6 +139,7 @@ export function WalletDetailClient({
         {activeTab === "payments" && (
           <PaymentsTab
             payments={payments}
+            orderDetailsBaseHref={orderDetailsBaseHref}
             currentPage={paymentsPage}
             hasMore={payments.length === limit}
             onPageChange={(page) => {
@@ -138,6 +152,7 @@ export function WalletDetailClient({
         {activeTab === "orders" && (
           <OrdersTab
             orders={orders}
+            orderDetailsBaseHref={orderDetailsBaseHref}
             currentPage={ordersPage}
             hasMore={orders.length === limit}
             onPageChange={(page) => {

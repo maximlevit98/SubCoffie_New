@@ -1,13 +1,17 @@
 import Link from "next/link";
-import { getUserRole } from "@/lib/supabase/roles";
 import { redirect } from "next/navigation";
+
+import { OwnerSidebar } from "@/components/OwnerSidebar";
 import {
-  getOwnerWalletOverview,
-  getOwnerWalletTransactions,
-  getOwnerWalletPayments,
+  getOwnerCafesForFilters,
   getOwnerWalletOrders,
+  getOwnerWalletOverview,
+  getOwnerWalletPayments,
+  getOwnerWalletTransactions,
+  listOwnerWallets,
 } from "@/lib/supabase/queries/owner-wallets";
-import { OwnerWalletDetailClient } from "./OwnerWalletDetailClient";
+import { getUserRole } from "@/lib/supabase/roles";
+import { WalletDetailClient } from "../../../wallets/[walletId]/WalletDetailClient";
 
 type OwnerWalletDetailsPageProps = {
   params: Promise<{
@@ -18,101 +22,143 @@ type OwnerWalletDetailsPageProps = {
 export default async function OwnerWalletDetailsPage({
   params,
 }: OwnerWalletDetailsPageProps) {
-  // Auth check
+  const { walletId } = await params;
   const { role, userId } = await getUserRole();
 
-  if (!role || !userId) {
+  if (!userId) {
     redirect("/login");
   }
 
-  if (role !== "owner" && role !== "admin") {
-    redirect("/admin/owner/dashboard");
+  if (role !== "owner") {
+    redirect("/admin/dashboard");
   }
 
-  const { walletId } = await params;
-  let error: string | null = null;
-
-  // Fetch detailed data for this wallet (owner RPC will check ownership)
-  const [
-    { data: overview, error: overviewError },
-    { data: transactions, error: transactionsError },
-    { data: payments, error: paymentsError },
-    { data: orders, error: ordersError },
-  ] = await Promise.all([
+  const [{ data: cafes }, { data: overview, error: overviewError }] = await Promise.all([
+    getOwnerCafesForFilters(),
     getOwnerWalletOverview(walletId),
-    getOwnerWalletTransactions(walletId, 50, 0),
-    getOwnerWalletPayments(walletId, 50, 0),
-    getOwnerWalletOrders(walletId, 50, 0),
   ]);
 
-  if (overviewError || transactionsError || paymentsError || ordersError) {
-    error =
-      overviewError ||
-      transactionsError ||
-      paymentsError ||
-      ordersError ||
-      "Unknown error";
-  }
+  const cafesCount = cafes?.length || 0;
 
-  if (error) {
-    return (
-      <section className="space-y-4 p-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-semibold">Кошелёк</h2>
-          <Link
-            href="/admin/owner/wallets"
-            className="text-sm text-zinc-600 hover:text-zinc-900"
-          >
-            ← Назад к кошелькам
-          </Link>
-        </div>
-        <div className="rounded-lg border border-red-200 bg-red-50 p-6">
-          <div className="flex items-start gap-3">
-            <span className="text-2xl">⚠️</span>
-            <div>
-              <h3 className="mb-2 font-semibold text-red-900">
-                Ошибка загрузки данных
-              </h3>
-              <p className="text-sm text-red-700">{error}</p>
-              <p className="mt-2 text-xs text-red-600">
-                Возможно, этот кошелёк не привязан к вашим кофейням
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-    );
+  if (overviewError) {
+    return renderErrorState(overviewError, cafesCount);
   }
 
   if (!overview) {
-    return (
-      <section className="space-y-4 p-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-semibold">Кошелёк</h2>
-          <Link
-            href="/admin/owner/wallets"
-            className="text-sm text-zinc-600 hover:text-zinc-900"
-          >
-            ← Назад к кошелькам
-          </Link>
-        </div>
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-6">
-          <p className="text-sm text-amber-800">
-            Не удалось загрузить данные кошелька
-          </p>
-        </div>
-      </section>
-    );
+    return renderNotFoundState(cafesCount);
   }
 
+  const [
+    { data: transactions, error: transactionsError },
+    { data: payments, error: paymentsError },
+    { data: orders, error: ordersError },
+    { data: relatedWallets },
+  ] = await Promise.all([
+    getOwnerWalletTransactions(walletId, 50, 0),
+    getOwnerWalletPayments(walletId, 50, 0),
+    getOwnerWalletOrders(walletId, 50, 0),
+    listOwnerWallets({ limit: 500, offset: 0 }),
+  ]);
+
+  const dataError = transactionsError || paymentsError || ordersError;
+  if (dataError) {
+    return renderErrorState(dataError, cafesCount);
+  }
+
+  const userWallets = (relatedWallets || []).filter(
+    (wallet) => wallet.user_id === overview.user_id
+  );
+
   return (
-    <section className="p-6">
-      <OwnerWalletDetailClient
-        overview={overview}
-        transactions={transactions || []}
-        payments={payments || []}
-        orders={orders || []}
-      />
-    </section>
+    <div className="flex min-h-[calc(100vh-73px)]">
+      <OwnerSidebar currentContext="account" cafesCount={cafesCount} />
+      <main className="flex-1 px-6 py-6">
+        <div className="mx-auto max-w-7xl">
+          {userWallets.length > 1 && (
+            <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <p className="text-sm font-medium text-blue-900">
+                У клиента {userWallets.length} кошельков в ваших кофейнях
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {userWallets.map((wallet) => (
+                  <Link
+                    key={wallet.wallet_id}
+                    href={`/admin/owner/wallets/${wallet.wallet_id}`}
+                    className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium ${
+                      wallet.wallet_id === walletId
+                        ? "bg-blue-600 text-white"
+                        : "bg-blue-100 text-blue-700 hover:bg-blue-200"
+                    }`}
+                  >
+                    {wallet.cafe_name || "Кофейня"} • {wallet.balance_credits} кр.
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <WalletDetailClient
+            overview={overview}
+            transactions={transactions || []}
+            payments={payments || []}
+            orders={orders || []}
+            title="Кошелёк клиента"
+            backHref="/admin/owner/wallets"
+            showUserProfileLink={false}
+            userProfileHref={null}
+            orderDetailsBaseHref=""
+          />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function renderErrorState(error: string, cafesCount: number) {
+  return (
+    <div className="flex min-h-[calc(100vh-73px)]">
+      <OwnerSidebar currentContext="account" cafesCount={cafesCount} />
+      <main className="flex-1 px-6 py-6">
+        <div className="mx-auto max-w-7xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-semibold">Кошелёк клиента</h2>
+            <Link
+              href="/admin/owner/wallets"
+              className="text-sm text-zinc-600 hover:text-zinc-900"
+            >
+              ← Назад к кошелькам
+            </Link>
+          </div>
+          <div className="rounded-lg border border-red-200 bg-red-50 p-6">
+            <p className="text-sm font-medium text-red-900">Ошибка загрузки</p>
+            <p className="mt-1 text-sm text-red-700">{error}</p>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function renderNotFoundState(cafesCount: number) {
+  return (
+    <div className="flex min-h-[calc(100vh-73px)]">
+      <OwnerSidebar currentContext="account" cafesCount={cafesCount} />
+      <main className="flex-1 px-6 py-6">
+        <div className="mx-auto max-w-7xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-semibold">Кошелёк клиента</h2>
+            <Link
+              href="/admin/owner/wallets"
+              className="text-sm text-zinc-600 hover:text-zinc-900"
+            >
+              ← Назад к кошелькам
+            </Link>
+          </div>
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-6 text-sm text-amber-800">
+            Кошелёк не найден или недоступен.
+          </div>
+        </div>
+      </main>
+    </div>
   );
 }

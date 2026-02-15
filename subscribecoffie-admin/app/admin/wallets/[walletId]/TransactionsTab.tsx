@@ -5,6 +5,7 @@ import { type AdminWalletTransaction } from "../../../../lib/supabase/queries/wa
 
 type TransactionsTabProps = {
   transactions: AdminWalletTransaction[];
+  orderDetailsBaseHref?: string;
   currentPage: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -12,6 +13,7 @@ type TransactionsTabProps = {
 
 export function TransactionsTab({
   transactions,
+  orderDetailsBaseHref = "/admin/orders",
   currentPage,
   hasMore,
   onPageChange,
@@ -118,12 +120,18 @@ export function TransactionsTab({
                   <td className="px-4 py-3 text-sm">
                     <div className="flex flex-col gap-1">
                       {tx.order_id && (
-                        <Link
-                          href={`/admin/orders/${tx.order_id}`}
-                          className="text-xs text-blue-600 hover:text-blue-800 underline"
-                        >
-                          📦 {tx.order_number || tx.order_id.slice(0, 8)}
-                        </Link>
+                        orderDetailsBaseHref ? (
+                          <Link
+                            href={`${orderDetailsBaseHref}/${tx.order_id}`}
+                            className="text-xs text-blue-600 hover:text-blue-800 underline"
+                          >
+                            📦 {tx.order_number || tx.order_id.slice(0, 8)}
+                          </Link>
+                        ) : (
+                          <span className="text-xs text-zinc-600">
+                            📦 {tx.order_number || tx.order_id.slice(0, 8)}
+                          </span>
+                        )
                       )}
                       {!tx.order_id && <span className="text-xs text-zinc-400">—</span>}
                     </div>

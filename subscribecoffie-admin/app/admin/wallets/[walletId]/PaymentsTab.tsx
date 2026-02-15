@@ -5,6 +5,7 @@ import { type AdminWalletPayment } from "../../../../lib/supabase/queries/wallet
 
 type PaymentsTabProps = {
   payments: AdminWalletPayment[];
+  orderDetailsBaseHref?: string;
   currentPage: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -12,6 +13,7 @@ type PaymentsTabProps = {
 
 export function PaymentsTab({
   payments,
+  orderDetailsBaseHref = "/admin/orders",
   currentPage,
   hasMore,
   onPageChange,
@@ -122,12 +124,18 @@ export function PaymentsTab({
                   <td className="px-4 py-3 text-xs">
                     <div className="flex flex-col gap-1 max-w-xs">
                       {payment.order_id && (
-                        <Link
-                          href={`/admin/orders/${payment.order_id}`}
-                          className="text-blue-600 hover:text-blue-800 underline"
-                        >
-                          📦 {payment.order_number || payment.order_id.slice(0, 8)}
-                        </Link>
+                        orderDetailsBaseHref ? (
+                          <Link
+                            href={`${orderDetailsBaseHref}/${payment.order_id}`}
+                            className="text-blue-600 hover:text-blue-800 underline"
+                          >
+                            📦 {payment.order_number || payment.order_id.slice(0, 8)}
+                          </Link>
+                        ) : (
+                          <span className="text-zinc-600">
+                            📦 {payment.order_number || payment.order_id.slice(0, 8)}
+                          </span>
+                        )
                       )}
                       
                       {payment.payment_method_id && (

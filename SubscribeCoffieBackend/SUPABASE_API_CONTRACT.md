@@ -127,6 +127,236 @@ Validates token, checks status `ready`, then:
 - sets `issued_at`
 - inserts `order_events_core(status='issued')`
 
+---
+
+## Owner Wallet Analytics RPC
+
+**Access**: Owner/Admin only. Owner can only access `cafe_wallet` wallets for cafes they own (via `accounts.owner_user_id`). Admin can access all.
+
+**Security Model**:
+- Owner: Strict ownership check via `cafes.account_id → accounts.owner_user_id = auth.uid()`
+- Admin: Bypass ownership check (can access all wallets)
+- CityPass wallets: Excluded from owner scope (not cafe-specific)
+
+### `owner_get_wallets(p_cafe_id?, p_limit?, p_offset?, p_search?)`
+
+**Parameters**:
+- `p_cafe_id` (uuid, optional): Filter by specific cafe
+- `p_limit` (int, default 50): Max results (clamped 1-200)
+- `p_offset` (int, default 0): Pagination offset
+- `p_search` (text, optional): Search by user email/phone/name or cafe name
+
+**Returns** (TABLE):
+```typescript
+{
+  wallet_id: uuid,
+  user_id: uuid,
+  wallet_type: 'cafe_wallet',
+  balance_credits: number,
+  lifetime_top_up_credits: number,
+  created_at: timestamp,
+  user_email: string,
+  user_phone: string,
+  user_full_name: string,
+  cafe_id: uuid,
+  cafe_name: string,
+  last_transaction_at: timestamp | null,
+  last_payment_at: timestamp | null,
+  last_order_at: timestamp | null,
+  total_transactions: number,
+  total_payments: number,
+  total_orders: number,
+  total_topups: number,
+  total_refunds: number,
+  total_topup_credits: number,
+  total_spent_credits: number,
+  total_refund_credits: number,
+  net_wallet_change_credits: number,
+  total_orders_paid_credits: number
+}[]
+```
+
+**Errors**:
+- `Owner or admin access required`: User is not owner/admin
+- `Unauthorized: cafe not owned by you`: Owner trying to access unowned cafe
+
+### `owner_get_wallet_overview(p_wallet_id)`
+
+**Parameters**:
+- `p_wallet_id` (uuid, required): Wallet ID
+
+**Returns** (TABLE, single row):
+```typescript
+{
+  wallet_id: uuid,
+  user_id: uuid,
+  wallet_type: 'cafe_wallet',
+  balance_credits: number,
+  lifetime_top_up_credits: number,
+  created_at: timestamp,
+  updated_at: timestamp,
+  user_email: string,
+  user_phone: string,
+  user_full_name: string,
+  user_avatar_url: string | null,
+  user_registered_at: timestamp,
+  cafe_id: uuid,
+  cafe_name: string,
+  cafe_address: string,
+  total_transactions: number,
+  total_topups: number,
+  total_payments: number,
+  total_refunds: number,
+  total_orders: number,
+  completed_orders: number,
+  last_transaction_at: timestamp | null,
+  last_payment_at: timestamp | null,
+  last_order_at: timestamp | null,
+  total_topup_credits: number,
+  total_payment_credits: number,
+  total_refund_credits: number,
+  total_adjustment_credits: number,
+  net_wallet_change_credits: number,
+  total_orders_paid_credits: number,
+  avg_order_paid_credits: number,
+  last_topup_at: timestamp | null,
+  last_refund_at: timestamp | null
+}
+```
+
+**Errors**:
+- `Owner or admin access required`: User is not owner/admin
+- `Invalid wallet_id: NULL`: Wallet ID is NULL
+- `Unauthorized: wallet not accessible`: Owner doesn't own the wallet's cafe
+
+### `owner_get_wallet_transactions(p_wallet_id, p_limit?, p_offset?)`
+
+**Parameters**:
+- `p_wallet_id` (uuid, required): Wallet ID
+- `p_limit` (int, default 50): Max results (clamped 1-200)
+- `p_offset` (int, default 0): Pagination offset
+
+**Returns** (TABLE):
+```typescript
+{
+  transaction_id: uuid,
+  wallet_id: uuid,
+  amount: number,  // Positive = topup/refund, negative = payment
+  type: 'topup' | 'payment' | 'refund' | 'adjustment',
+  description: string,
+  order_id: uuid | null,
+  order_number: string | null,
+  actor_user_id: uuid | null,
+  actor_email: string | null,
+  actor_full_name: string | null,
+  balance_before: number,
+  balance_after: number,
+  created_at: timestamp
+}[]
+```
+
+**Sorting**: DESC by `created_at` (newest first)
+
+**Errors**: Same as `owner_get_wallet_overview`
+
+### `owner_get_wallet_payments(p_wallet_id, p_limit?, p_offset?)`
+
+**Parameters**:
+- `p_wallet_id` (uuid, required): Wallet ID
+- `p_limit` (int, default 50): Max results (clamped 1-200)
+- `p_offset` (int, default 0): Pagination offset
+
+**Returns** (TABLE):
+```typescript
+{
+  payment_id: uuid,
+  wallet_id: uuid,
+  order_id: uuid | null,
+  order_number: string | null,
+  amount_credits: number,  // Gross amount
+  commission_credits: number,
+  net_amount: number,  // amount - commission
+  transaction_type: 'topup' | 'order',
+  payment_method_id: uuid | null,
+  status: 'pending' | 'completed' | 'failed' | 'refunded',
+  provider_transaction_id: string | null,
+  idempotency_key: string | null,
+  created_at: timestamp,
+  completed_at: timestamp | null
+}[]
+```
+
+**Sorting**: DESC by `created_at` (newest first)
+
+**Errors**: Same as `owner_get_wallet_overview`
+
+### `owner_get_wallet_orders(p_wallet_id, p_limit?, p_offset?)`
+
+**Parameters**:
+- `p_wallet_id` (uuid, required): Wallet ID
+- `p_limit` (int, default 50): Max results (clamped 1-200)
+- `p_offset` (int, default 0): Pagination offset
+
+**Returns** (TABLE):
+```typescript
+{
+  order_id: uuid,
+  order_number: string,
+  created_at: timestamp,
+  status: string,
+  cafe_id: uuid,
+  cafe_name: string,
+  subtotal_credits: number,
+  paid_credits: number,
+  bonus_used: number,
+  payment_method: string,
+  payment_status: string,
+  customer_name: string,
+  customer_phone: string,
+  items: [  // Always array, never null
+    {
+      item_id: uuid,
+      item_name: string,
+      qty: number,
+      unit_price_credits: number,
+      line_total_credits: number,
+      modifiers: jsonb | null
+    }
+  ]
+}[]
+```
+
+**Sorting**: DESC by `created_at` (newest first)
+
+**Errors**: Same as `owner_get_wallet_overview`
+
+### `owner_get_wallets_stats(p_cafe_id?)`
+
+**Parameters**:
+- `p_cafe_id` (uuid, optional): Filter by specific cafe
+
+**Returns** (TABLE, single row):
+```typescript
+{
+  total_wallets: number,
+  total_balance_credits: number,
+  total_lifetime_topup_credits: number,
+  total_transactions: number,
+  total_orders: number,
+  total_revenue_credits: number,  // Sum of paid_credits + bonus_used
+  avg_wallet_balance: number,
+  active_wallets_30d: number,  // Wallets with transactions in last 30 days
+  total_topup_credits: number,
+  total_spent_credits: number,
+  total_refund_credits: number,
+  net_wallet_change_credits: number
+}
+```
+
+**Errors**: Same as `owner_get_wallets`
+
+---
+
 ## REST examples
 
 ### GET /rest/v1/cafes?select=id,name&limit=1
