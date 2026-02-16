@@ -1,7 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-
-import { OwnerSidebar } from "@/components/OwnerSidebar";
 import {
   getOwnerCafesForFilters,
   getOwnerWalletsStats,
@@ -9,7 +6,6 @@ import {
   type OwnerWalletsStats,
 } from "@/lib/supabase/queries/owner-wallets";
 import type { AdminWallet } from "@/lib/supabase/queries/wallets";
-import { getUserRole } from "@/lib/supabase/roles";
 
 type WalletsPageProps = {
   searchParams: Promise<{
@@ -71,15 +67,6 @@ function buildHref(
 
 export default async function OwnerWalletsPage({ searchParams }: WalletsPageProps) {
   const params = await searchParams;
-  const { role, userId } = await getUserRole();
-
-  if (!userId) {
-    redirect("/login");
-  }
-
-  if (role !== "owner") {
-    redirect("/admin/dashboard");
-  }
 
   const search = (params.search || "").trim();
   const cafeFilter = params.cafe || "";
@@ -99,7 +86,6 @@ export default async function OwnerWalletsPage({ searchParams }: WalletsPageProp
     getOwnerWalletsStats(cafeFilter || undefined),
   ]);
 
-  const cafesCount = cafes?.length || 0;
   const wallets = walletsResult.data || [];
   const stats = statsResult.data;
   const error = cafesError || walletsResult.error || statsResult.error;
@@ -124,45 +110,42 @@ export default async function OwnerWalletsPage({ searchParams }: WalletsPageProp
   });
 
   return (
-    <div className="flex min-h-[calc(100vh-73px)]">
-      <OwnerSidebar currentContext="account" cafesCount={cafesCount} />
-      <main className="flex-1 px-6 py-6">
-        <div className="mx-auto max-w-7xl space-y-6">
-          <div className="flex items-start justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-zinc-900">Кошельки клиентов</h1>
-              <p className="mt-1 text-sm text-zinc-600">
-                Только кошельки ваших кофеен. CityPass кошельки в owner scope не отображаются.
-              </p>
-            </div>
-            <span className="rounded-md bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
-              Owner scope
-            </span>
-          </div>
+    <div className="space-y-6">
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-900">Кошельки клиентов</h1>
+          <p className="mt-1 text-sm text-zinc-600">
+            Только кошельки ваших кофеен. CityPass кошельки в owner scope не отображаются.
+          </p>
+        </div>
+        <span className="rounded-md bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
+          Owner scope
+        </span>
+      </div>
 
-          {error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-5">
-              <p className="text-sm font-medium text-red-800">Не удалось загрузить кошельки</p>
-              <p className="mt-1 text-sm text-red-700">{error}</p>
-            </div>
-          ) : (
-            <>
-              <StatsGrid stats={stats} />
+      {error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-5">
+          <p className="text-sm font-medium text-red-800">Не удалось загрузить кошельки</p>
+          <p className="mt-1 text-sm text-red-700">{error}</p>
+        </div>
+      ) : (
+        <>
+          <StatsGrid stats={stats} />
 
-              <section className="rounded-lg border border-zinc-200 bg-white p-4">
-                <form className="grid grid-cols-1 gap-4 md:grid-cols-12" method="get">
-                  <div className="md:col-span-4">
-                    <label htmlFor="search" className="mb-1 block text-xs font-medium text-zinc-600">
-                      Поиск
-                    </label>
-                    <input
-                      id="search"
-                      name="search"
-                      defaultValue={search}
-                      placeholder="Email, телефон, имя, кофейня"
-                      className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
+          <section className="rounded-lg border border-zinc-200 bg-white p-4">
+            <form className="grid grid-cols-1 gap-4 md:grid-cols-12" method="get">
+              <div className="md:col-span-4">
+                <label htmlFor="search" className="mb-1 block text-xs font-medium text-zinc-600">
+                  Поиск
+                </label>
+                <input
+                  id="search"
+                  name="search"
+                  defaultValue={search}
+                  placeholder="Email, телефон, имя, кофейня"
+                  className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+              </div>
 
                   <div className="md:col-span-3">
                     <label htmlFor="cafe" className="mb-1 block text-xs font-medium text-zinc-600">
@@ -239,10 +222,10 @@ export default async function OwnerWalletsPage({ searchParams }: WalletsPageProp
                       </button>
                     </div>
                   </div>
-                </form>
-              </section>
+            </form>
+          </section>
 
-              <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm">
+          <section className="overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm">
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-zinc-200">
                     <thead className="bg-zinc-50">
@@ -314,11 +297,9 @@ export default async function OwnerWalletsPage({ searchParams }: WalletsPageProp
                     </Link>
                   </div>
                 </div>
-              </section>
-            </>
-          )}
-        </div>
-      </main>
+          </section>
+        </>
+      )}
     </div>
   );
 }
