@@ -22,6 +22,8 @@ type FinancialControlTowerViewProps = {
   metrics: FinancialControlMetrics | null;
   anomalies: FinancialAnomaly[];
   error: string | null;
+  hideCafeFilter?: boolean;
+  lockedCafeLabel?: string | null;
 };
 
 function formatCredits(value: number): string {
@@ -50,6 +52,8 @@ export function FinancialControlTowerView({
   metrics,
   anomalies,
   error,
+  hideCafeFilter = false,
+  lockedCafeLabel = null,
 }: FinancialControlTowerViewProps) {
   const dateRange = toDateRange(rangeDays);
 
@@ -87,26 +91,38 @@ export function FinancialControlTowerView({
             </select>
           </div>
 
-          <div className="md:col-span-5">
-            <label htmlFor="cafe" className="mb-1 block text-xs font-medium text-zinc-600">
-              Кофейня
-            </label>
-            <select
-              id="cafe"
-              name="cafe"
-              defaultValue={cafeFilter}
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Все кофейни</option>
-              {cafes.map((cafe) => (
-                <option key={cafe.id} value={cafe.id}>
-                  {cafe.name || cafe.id}
-                </option>
-              ))}
-            </select>
-          </div>
+          {hideCafeFilter ? (
+            <div className="md:col-span-6">
+              <label className="mb-1 block text-xs font-medium text-zinc-600">
+                Кофейня
+              </label>
+              <div className="rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-700">
+                {lockedCafeLabel || "Текущая кофейня"}
+              </div>
+              {cafeFilter && <input type="hidden" name="cafe" value={cafeFilter} />}
+            </div>
+          ) : (
+            <div className="md:col-span-5">
+              <label htmlFor="cafe" className="mb-1 block text-xs font-medium text-zinc-600">
+                Кофейня
+              </label>
+              <select
+                id="cafe"
+                name="cafe"
+                defaultValue={cafeFilter}
+                className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              >
+                <option value="">Все кофейни</option>
+                {cafes.map((cafe) => (
+                  <option key={cafe.id} value={cafe.id}>
+                    {cafe.name || cafe.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
-          <div className="md:col-span-4 flex items-end justify-end gap-2">
+          <div className={`${hideCafeFilter ? "md:col-span-3" : "md:col-span-4"} flex items-end justify-end gap-2`}>
             <Link
               href={basePath}
               className="rounded-md border border-zinc-300 px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-50"
