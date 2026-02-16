@@ -41,7 +41,7 @@ export default async function LegacyAdminLayout({
               href="/admin/payments"
               className="rounded px-3 py-2 hover:bg-zinc-100"
             >
-              💰 Платежи (Mock)
+              💰 Financial Control
             </Link>
             {role === "admin" && (
               <Link

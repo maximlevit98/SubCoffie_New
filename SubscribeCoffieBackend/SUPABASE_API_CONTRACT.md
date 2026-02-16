@@ -357,6 +357,82 @@ Validates token, checks status `ready`, then:
 
 ---
 
+## Financial Control Tower RPC
+
+### `admin_get_financial_control_tower(p_from?, p_to?, p_cafe_id?)`
+
+**Access**: Admin only
+
+**Returns** (single row):
+```typescript
+{
+  scope: "admin",
+  date_from: timestamp,
+  date_to: timestamp,
+  selected_cafe_id: uuid | null,
+  topup_completed_count: number,
+  topup_completed_credits: number,
+  order_payment_completed_count: number,
+  order_payment_completed_credits: number,
+  refund_completed_count: number,
+  refund_completed_credits: number,
+  platform_commission_credits: number,
+  pending_credits: number,
+  failed_credits: number,
+  wallet_balance_snapshot_credits: number,
+  orders_count: number,
+  completed_orders_count: number,
+  orders_paid_credits: number,
+  wallet_ledger_delta_credits: number,
+  expected_wallet_delta_credits: number,
+  discrepancy_credits: number
+}
+```
+
+**Notes**:
+- `discrepancy_credits = wallet_ledger_delta_credits - expected_wallet_delta_credits`
+- `expected_wallet_delta_credits = topups + refunds - order_payments`
+
+### `admin_get_financial_anomalies(p_from?, p_to?, p_cafe_id?, p_limit?)`
+
+**Access**: Admin only
+
+**Returns**:
+```typescript
+{
+  anomaly_key: string,
+  severity: "critical" | "high" | "medium" | "low",
+  anomaly_type: string,
+  wallet_id: uuid | null,
+  order_id: uuid | null,
+  cafe_id: uuid | null,
+  amount_credits: number,
+  detected_at: timestamp,
+  message: string,
+  details: jsonb | null
+}[]
+```
+
+**Anomaly types**:
+- `negative_wallet_balance`
+- `wallet_order_without_payment_tx`
+- `completed_payment_without_wallet_ledger`
+- `reconciliation_delta`
+
+### `owner_get_financial_control_tower(p_from?, p_to?, p_cafe_id?)`
+
+**Access**: Owner/Admin. Owner scope is restricted to owned cafes only.
+
+**Returns**: Same contract as `admin_get_financial_control_tower`, with `scope = "owner"`.
+
+### `owner_get_financial_anomalies(p_from?, p_to?, p_cafe_id?, p_limit?)`
+
+**Access**: Owner/Admin. Owner receives only anomalies for owned cafes.
+
+**Returns**: Same contract as `admin_get_financial_anomalies`.
+
+---
+
 ## REST examples
 
 ### GET /rest/v1/cafes?select=id,name&limit=1

@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase/server';
 import { getUserRole } from '@/lib/supabase/roles';
 import { getOwnerWalletsStats } from '@/lib/supabase/queries/owner-wallets';
+import { getOwnerFinancialControlTower } from '@/lib/supabase/queries/financial-control';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { OwnerSidebar } from '@/components/OwnerSidebar';
@@ -47,6 +48,7 @@ export default async function OwnerDashboardPage() {
   let todayRevenue = 0;
   let recentOrders: DashboardOrder[] = [];
   const { data: walletStats, error: walletStatsError } = await getOwnerWalletsStats();
+  const { data: financialMetrics, error: financialMetricsError } = await getOwnerFinancialControlTower();
 
   if (hasCafes) {
     const cafeIds = ownerCafes.map((cafe) => cafe.id);
@@ -214,6 +216,55 @@ export default async function OwnerDashboardPage() {
                   value={walletStats?.net_wallet_change_credits || 0}
                   suffix="кр."
                   tone={(walletStats?.net_wallet_change_credits || 0) >= 0 ? 'green' : 'red'}
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="mb-8">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-zinc-900">
+                Финансовый контроль (30 дней)
+              </h2>
+              <Link
+                href="/admin/owner/finances"
+                className="text-sm font-medium text-blue-600 hover:text-blue-700"
+              >
+                Открыть Control Tower →
+              </Link>
+            </div>
+
+            {financialMetricsError ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                <p className="text-sm text-amber-800">
+                  Не удалось загрузить финансовый контроль: {financialMetricsError}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <MetricCard
+                  label="Пополнения"
+                  value={financialMetrics?.topup_completed_credits || 0}
+                  suffix="кр."
+                  tone="green"
+                />
+                <MetricCard
+                  label="Списания"
+                  value={financialMetrics?.order_payment_completed_credits || 0}
+                  suffix="кр."
+                  tone="red"
+                />
+                <MetricCard
+                  label="Комиссия"
+                  value={financialMetrics?.platform_commission_credits || 0}
+                  suffix="кр."
+                  tone="blue"
+                />
+                <MetricCard
+                  label="Reconciliation Δ"
+                  value={financialMetrics?.discrepancy_credits || 0}
+                  suffix="кр."
+                  tone={(financialMetrics?.discrepancy_credits || 0) === 0 ? 'green' : 'red'}
                 />
               </div>
             )}
