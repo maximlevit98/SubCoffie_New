@@ -433,6 +433,39 @@ Validates token, checks status `ready`, then:
 
 ---
 
+## Commission & Bonus Model (2026-02-16)
+
+### Policy Summary
+- `cafe_wallet_topup`: customer wallet is credited with full top-up amount, commission is paid by cafe.
+- `citypass_order_payment`: commission is applied per order transaction and paid by cafe.
+- `citypass_topup`: expected to be `0%` for top-up preview (fee does not reduce customer credit).
+
+### `payment_transactions` (extended fields)
+```typescript
+{
+  fee_payer: "customer" | "cafe" | "platform",
+  fee_cafe_id: uuid | null
+}
+```
+
+### `get_commission_for_wallet(p_wallet_id)`
+- Returns top-up preview rate for wallet.
+- For `citypass` wallets, expected rate is `0` (commission handled at order payment stage).
+
+### `mock_wallet_topup(p_wallet_id, p_amount, p_payment_method_id?, p_idempotency_key?)`
+- Credits full top-up amount to wallet balance.
+- For `cafe_wallet`, fee metadata is stored in `payment_transactions` with:
+  - `fee_payer = "cafe"`
+  - `fee_cafe_id = wallet.cafe_id`
+
+### Runtime hook: CityPass order commission
+- Trigger `apply_citypass_order_payment_commission` enriches `payment_transactions` when `order_payment` is linked to an order:
+  - computes `commission_credits` by policy
+  - sets `fee_payer = "cafe"`
+  - sets `fee_cafe_id = orders_core.cafe_id`
+
+---
+
 ## REST examples
 
 ### GET /rest/v1/cafes?select=id,name&limit=1
