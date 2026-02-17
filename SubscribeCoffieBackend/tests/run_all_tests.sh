@@ -59,7 +59,19 @@ else
 fi
 
 echo ""
-echo "Step 4: Running Analytics tests..."
+echo "Step 4: Running TRK-01 wallet smoke tests..."
+echo "========================================="
+psql "$DATABASE_URL" -f tests/wallet_trk01_smoke.sql
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✅ TRK-01 wallet smoke tests passed${NC}"
+else
+    echo -e "${RED}❌ TRK-01 wallet smoke tests failed${NC}"
+    exit 1
+fi
+
+echo ""
+echo "Step 5: Running Analytics tests..."
 echo "========================================="
 psql "$DATABASE_URL" -f tests/analytics.test.sql
 
@@ -71,7 +83,7 @@ else
 fi
 
 echo ""
-echo "Step 5: Running Payment Integration tests..."
+echo "Step 6: Running Payment Integration tests..."
 echo "========================================="
 psql "$DATABASE_URL" -f tests/payment_integration.test.sql
 
@@ -83,7 +95,7 @@ else
 fi
 
 echo ""
-echo "Step 6: Running RPC Integration tests..."
+echo "Step 7: Running RPC Integration tests..."
 echo "========================================="
 psql "$DATABASE_URL" -f tests/rpc_integration.test.sql
 
@@ -103,6 +115,7 @@ echo "Test Summary:"
 echo "  - Test data: ✅"
 echo "  - Orders RPC: ✅"
 echo "  - Wallets Canonical RPC: ✅"
+echo "  - TRK-01 Wallet Smoke: ✅"
 echo "  - Analytics: ✅"
 echo "  - Payment Integration: ✅"
 echo "  - RPC Integration: ✅"

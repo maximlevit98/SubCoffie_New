@@ -9,6 +9,13 @@ import Foundation
 import Combine
 import Auth
 
+private struct SupabaseRPCErrorBody: Decodable {
+    let code: String?
+    let message: String?
+    let details: String?
+    let hint: String?
+}
+
 // MARK: - Wallet Service Errors
 
 enum WalletServiceError: LocalizedError {
@@ -37,6 +44,73 @@ class WalletService: ObservableObject {
     
     init(apiClient: SupabaseAPIClient = .shared) {
         self.apiClient = apiClient
+    }
+
+    // MARK: - Error Mapping
+
+    private func extractRPCErrorKey(from error: Error) -> String? {
+        if let networkError = error as? NetworkError,
+           case let .httpStatus(_, body) = networkError,
+           let body,
+           let data = body.data(using: .utf8),
+           let parsed = try? JSONDecoder().decode(SupabaseRPCErrorBody.self, from: data),
+           let message = parsed.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !message.isEmpty {
+            return message
+        }
+
+        return nil
+    }
+
+    private func mapWalletRPCError(_ error: Error) async throws -> Never {
+        let key = extractRPCErrorKey(from: error)
+        let fallbackMessage = error.localizedDescription
+
+        switch key {
+        case "wallet_auth_required":
+            try? await AuthService.shared.signOut()
+            throw WalletServiceError.authenticationRequired
+        case "wallet_user_not_found":
+            try? await AuthService.shared.signOut()
+            throw WalletServiceError.userNotFoundInDatabase
+        case "wallet_not_found":
+            throw WalletServiceError.unknown("Кошелёк не найден. Создайте кошелёк заново.")
+        case "wallet_amount_invalid":
+            throw WalletServiceError.unknown("Некорректная сумма пополнения")
+        case "wallet_access_denied":
+            throw WalletServiceError.unknown("Нет доступа к выбранному кошельку")
+        case "wallet_scope_required":
+            throw WalletServiceError.unknown("Выберите кофейню или сеть для создания кошелька")
+        case "wallet_scope_conflict":
+            throw WalletServiceError.unknown("Нельзя одновременно передавать cafe_id и network_id")
+        case "wallet_cafe_not_found":
+            throw WalletServiceError.unknown("Выбранная кофейня не найдена")
+        case "wallet_network_not_found":
+            throw WalletServiceError.unknown("Выбранная сеть не найдена")
+        default:
+            // Legacy compatibility for old migrations
+            if fallbackMessage.contains("Not authenticated") || fallbackMessage.contains("PGRST301") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.authenticationRequired
+            }
+
+            if fallbackMessage.contains("User not found in auth.users") {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+
+            if fallbackMessage.contains("23503") &&
+                (
+                    fallbackMessage.contains("auth.users") ||
+                    fallbackMessage.contains("wallets_user_id_fkey") ||
+                    fallbackMessage.contains("table \\\"users\\\"")
+                ) {
+                try? await AuthService.shared.signOut()
+                throw WalletServiceError.userNotFoundInDatabase
+            }
+
+            throw WalletServiceError.networkError(error)
+        }
     }
     
     // MARK: - Wallet Operations
@@ -107,39 +181,9 @@ class WalletService: ObservableObject {
             
             return walletId
         } catch {
-            // Log the actual error for debugging
             print("❌ [WalletService] createCityPassWallet error: \(error)")
             print("❌ [WalletService] Error localized: \(error.localizedDescription)")
-            
-            // Handle specific authentication errors ONLY
-            let errorMessage = error.localizedDescription
-            
-            // Check for explicit authentication errors
-            if errorMessage.contains("Not authenticated") || errorMessage.contains("PGRST301") {
-                // PGRST301 = JWT expired or invalid
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.authenticationRequired
-            }
-            
-            // Check for user not found in database (after db reset)
-            if errorMessage.contains("User not found in auth.users") {
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.userNotFoundInDatabase
-            }
-            
-            // Check for FK constraint violation (23503) when user row is missing
-            if errorMessage.contains("23503") &&
-                (
-                    errorMessage.contains("auth.users") ||
-                    errorMessage.contains("wallets_user_id_fkey") ||
-                    errorMessage.contains("table \\\"users\\\"")
-                ) {
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.userNotFoundInDatabase
-            }
-            
-            // For all other errors, don't sign out - just pass them through
-            throw WalletServiceError.networkError(error)
+            try await mapWalletRPCError(error)
         }
     }
     
@@ -173,39 +217,9 @@ class WalletService: ObservableObject {
             
             return walletId
         } catch {
-            // Log the actual error for debugging
             print("❌ [WalletService] createCafeWallet error: \(error)")
             print("❌ [WalletService] Error localized: \(error.localizedDescription)")
-            
-            // Handle specific authentication errors ONLY
-            let errorMessage = error.localizedDescription
-            
-            // Check for explicit authentication errors
-            if errorMessage.contains("Not authenticated") || errorMessage.contains("PGRST301") {
-                // PGRST301 = JWT expired or invalid
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.authenticationRequired
-            }
-            
-            // Check for user not found in database (after db reset)
-            if errorMessage.contains("User not found in auth.users") {
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.userNotFoundInDatabase
-            }
-            
-            // Check for FK constraint violation (23503) when user row is missing
-            if errorMessage.contains("23503") &&
-                (
-                    errorMessage.contains("auth.users") ||
-                    errorMessage.contains("wallets_user_id_fkey") ||
-                    errorMessage.contains("table \\\"users\\\"")
-                ) {
-                try? await AuthService.shared.signOut()
-                throw WalletServiceError.userNotFoundInDatabase
-            }
-            
-            // For all other errors, don't sign out - just pass them through
-            throw WalletServiceError.networkError(error)
+            try await mapWalletRPCError(error)
         }
     }
     
@@ -259,10 +273,15 @@ class WalletService: ObservableObject {
         print("💳 [WalletService] Mock top-up with idempotency key: \(key)")
         #endif
         
-        let response: MockTopupResponse = try await apiClient.rpc(
-            "mock_wallet_topup",
-            params: params
-        )
+        let response: MockTopupResponse
+        do {
+            response = try await apiClient.rpc(
+                "mock_wallet_topup",
+                params: params
+            )
+        } catch {
+            try await mapWalletRPCError(error)
+        }
         
         #if DEBUG
         if let message = response.message, message.contains("Idempotent") {

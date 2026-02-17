@@ -44,7 +44,7 @@ struct WalletTopUpView: View {
     private var fallbackCommissionPercent: Double {
         switch wallet.walletType {
         case .citypass:
-            return 7.0 // CityPass fallback: 7%
+            return 0.0 // CityPass fallback: commission is not deducted from client top-up
         case .cafe_wallet:
             return 4.0 // Cafe Wallet fallback: 4%
         }
@@ -60,7 +60,9 @@ struct WalletTopUpView: View {
     }
     
     private var amountCredited: Int {
-        return parsedAmount - commissionAmount
+        // Current business rule: top-up always credits full amount to client wallet.
+        // Service fee is accounted separately (fee payer is cafe/platform depending on flow).
+        return parsedAmount
     }
     
     var body: some View {
@@ -299,7 +301,7 @@ struct WalletTopUpView: View {
             
             HStack {
                 HStack(spacing: 4) {
-                    Text("Комиссия (\(String(format: "%.2f", actualCommissionPercent))%)")
+                    Text("Комиссия сервиса (\(String(format: "%.2f", actualCommissionPercent))%)")
                         .font(.subheadline)
                         .foregroundColor(.orange)
                     
@@ -314,11 +316,16 @@ struct WalletTopUpView: View {
                     }
                 }
                 Spacer()
-                Text("-\(commissionAmount) ₽")
+                Text("\(commissionAmount) ₽")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                     .foregroundColor(.orange)
             }
+
+            Text("Комиссия не списывается с клиента при пополнении")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             
             if commissionPercent == nil {
                 Text("Используется локальный тариф (backend недоступен)")

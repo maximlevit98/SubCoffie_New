@@ -4,6 +4,11 @@ struct ContentView: View {
 
     private let cafeRepository = CafeRepository()
 
+    enum WalletFlowRetryTarget {
+        case cityPass
+        case cafeWallet(cafeId: UUID, cafeName: String)
+    }
+
     // MARK: - Screens
     enum AppScreen {
         case login
@@ -74,6 +79,7 @@ struct ContentView: View {
     @State private var walletCreateType: WalletType = .citypass
     @State private var walletCreateScopeName: String? = nil
     @State private var walletCreateCafeId: UUID? = nil
+    @State private var lastWalletFlowRetryTarget: WalletFlowRetryTarget? = nil
     
     // Services
     private let orderService = OrderService()
@@ -411,6 +417,11 @@ struct ContentView: View {
             )
         }
         .alert("Ошибка кошелька", isPresented: $showWalletFlowError) {
+            if lastWalletFlowRetryTarget != nil {
+                Button("Повторить") {
+                    Task { await retryWalletFlow() }
+                }
+            }
             Button("ОК", role: .cancel) { }
         } message: {
             Text(walletFlowErrorMessage ?? "Неизвестная ошибка")
@@ -466,6 +477,7 @@ struct ContentView: View {
         pendingWalletType = nil
         pendingWalletScopeId = nil
         pendingWalletScopeName = nil
+        lastWalletFlowRetryTarget = nil
         currentScreen = .map
     }
 
@@ -586,6 +598,11 @@ struct ContentView: View {
 
     @MainActor
     private func startCityPassTopUpFlow() async {
+        if isWalletFlowLoading {
+            walletFlowLog("Ignored duplicate CityPass tap while loading")
+            return
+        }
+
         isWalletFlowLoading = true
         defer { isWalletFlowLoading = false }
 
@@ -595,12 +612,16 @@ struct ContentView: View {
         pendingWalletType = .citypass
         pendingWalletScopeId = nil
         pendingWalletScopeName = nil
+        lastWalletFlowRetryTarget = .cityPass
+
+        walletFlowLog("Start CityPass flow")
 
         if authService.currentUser == nil {
             await authService.checkSession()
         }
 
         guard authService.currentUser != nil else {
+            walletFlowLog("CityPass flow failed: no auth session")
             handleWalletFlowError(WalletServiceError.authenticationRequired)
             return
         }
@@ -611,18 +632,27 @@ struct ContentView: View {
         if let existingWallet = realWalletStore.cityPassWallet {
             // Wallet exists -> go directly to top-up
             realWalletStore.selectWallet(existingWallet)
+            showWalletCreateStep = false
             walletTopUpWallet = existingWallet
+            walletFlowLog("CityPass wallet exists -> open top-up \(existingWallet.id)")
         } else {
             // Wallet doesn't exist -> show create step
             walletCreateType = .citypass
             walletCreateScopeName = nil
             walletCreateCafeId = nil
+            walletTopUpWallet = nil
             showWalletCreateStep = true
+            walletFlowLog("CityPass wallet missing -> show create step")
         }
     }
 
     @MainActor
     private func startCafeWalletTopUpFlow(for cafe: CafeSummary) async {
+        if isWalletFlowLoading {
+            walletFlowLog("Ignored duplicate Cafe Wallet tap while loading")
+            return
+        }
+
         isWalletFlowLoading = true
         defer { isWalletFlowLoading = false }
 
@@ -634,12 +664,16 @@ struct ContentView: View {
         pendingWalletScopeName = cafe.name
         cafeWalletCafeId = cafe.id.uuidString
         cafeWalletCafeName = cafe.name
+        lastWalletFlowRetryTarget = .cafeWallet(cafeId: cafe.id, cafeName: cafe.name)
+
+        walletFlowLog("Start Cafe Wallet flow for cafe=\(cafe.id)")
 
         if authService.currentUser == nil {
             await authService.checkSession()
         }
 
         guard authService.currentUser != nil else {
+            walletFlowLog("Cafe Wallet flow failed: no auth session")
             handleWalletFlowError(WalletServiceError.authenticationRequired)
             return
         }
@@ -650,13 +684,17 @@ struct ContentView: View {
         if let existingWallet = realWalletStore.cafeWallet(forCafe: cafe.id) {
             // Wallet exists -> go directly to top-up
             realWalletStore.selectWallet(existingWallet)
+            showWalletCreateStep = false
             walletTopUpWallet = existingWallet
+            walletFlowLog("Cafe wallet exists -> open top-up \(existingWallet.id)")
         } else {
             // Wallet doesn't exist -> show create step
             walletCreateType = .cafe_wallet
             walletCreateScopeName = cafe.name
             walletCreateCafeId = cafe.id
+            walletTopUpWallet = nil
             showWalletCreateStep = true
+            walletFlowLog("Cafe wallet missing -> show create step for cafe=\(cafe.id)")
         }
     }
 
@@ -666,12 +704,15 @@ struct ContentView: View {
         pendingWalletScopeId = nil
         pendingWalletScopeName = nil
 
+        walletFlowLog("Flow error: \(error.localizedDescription)")
         walletFlowErrorMessage = error.localizedDescription
         showWalletFlowError = true
     }
 
     @MainActor
     private func handleWalletCreate() async throws {
+        walletFlowLog("Create wallet started: \(walletCreateType.rawValue)")
+
         switch walletCreateType {
         case .citypass:
             // Create CityPass wallet
@@ -688,6 +729,7 @@ struct ContentView: View {
             
             // Open top-up view
             walletTopUpWallet = createdWallet
+            walletFlowLog("Create wallet success: citypass \(createdWallet.id)")
             
         case .cafe_wallet:
             guard let cafeId = walletCreateCafeId else {
@@ -708,6 +750,7 @@ struct ContentView: View {
             
             // Open top-up view
             walletTopUpWallet = createdWallet
+            walletFlowLog("Create wallet success: cafe_wallet \(createdWallet.id)")
         }
     }
 
@@ -733,6 +776,7 @@ struct ContentView: View {
         defaultWalletKind = ""
         lastCafeId = ""
         lastCafeName = ""
+        lastWalletFlowRetryTarget = nil
         // Не сбрасываем walletType и walletScopeId при выходе
         currentScreen = .login
     }
@@ -754,6 +798,33 @@ struct ContentView: View {
     private func logScreenChange(runId: String = "cart-debug-3", from: AppScreen, to: AppScreen, cartCount: Int, subtotal: Int) {
         #if DEBUG
         print("H6[\(runId)] Screen change from \(from) to \(to), cartCount=\(cartCount), subtotal=\(subtotal)")
+        #endif
+    }
+
+    @MainActor
+    private func retryWalletFlow() async {
+        guard let target = lastWalletFlowRetryTarget else { return }
+        walletFlowErrorMessage = nil
+
+        switch target {
+        case .cityPass:
+            await startCityPassTopUpFlow()
+        case .cafeWallet(let cafeId, let cafeName):
+            if let cafe = availableCafes.first(where: { $0.id == cafeId }) {
+                await startCafeWalletTopUpFlow(for: cafe)
+            } else {
+                handleWalletFlowError(
+                    WalletServiceError.unknown(
+                        "Кофейня «\(cafeName)» недоступна. Обновите список кофеен и повторите попытку."
+                    )
+                )
+            }
+        }
+    }
+
+    private func walletFlowLog(_ message: String) {
+        #if DEBUG
+        print("[WalletFlow] \(message)")
         #endif
     }
     // #endregion

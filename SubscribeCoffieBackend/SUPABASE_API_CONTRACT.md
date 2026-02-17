@@ -466,6 +466,60 @@ Validates token, checks status `ready`, then:
 
 ---
 
+## Wallet RPC Contracts (iOS Core Flow, TRK-01)
+
+### `create_citypass_wallet(p_user_id)`
+- Idempotent: returns existing wallet id if CityPass wallet already exists.
+- Auth-bound: caller can create wallet only for self (except service/admin context).
+
+**Normalized errors**:
+- `wallet_auth_required`
+- `wallet_access_denied`
+- `wallet_user_id_required`
+- `wallet_user_not_found`
+
+### `create_cafe_wallet(p_user_id, p_cafe_id?, p_network_id?)`
+- Idempotent by scope:
+  - one `cafe_wallet` per `(user_id, cafe_id)`
+  - one `cafe_wallet` per `(user_id, network_id)`
+- Exactly one scope must be provided (`cafe_id` xor `network_id`).
+
+**Normalized errors**:
+- `wallet_auth_required`
+- `wallet_access_denied`
+- `wallet_user_id_required`
+- `wallet_user_not_found`
+- `wallet_scope_required`
+- `wallet_scope_conflict`
+- `wallet_cafe_not_found`
+- `wallet_network_not_found`
+
+### `get_user_wallets(p_user_id)`
+- Returns all wallets for user with canonical fields:
+  - `id`, `wallet_type`, `balance_credits`, `lifetime_top_up_credits`, `cafe_id`, `cafe_name`, `network_id`, `network_name`, `created_at`
+- Access:
+  - own wallets
+  - admin
+  - service role
+
+**Normalized errors**:
+- `wallet_auth_required`
+- `wallet_access_denied`
+- `wallet_user_id_required`
+
+### `mock_wallet_topup(p_wallet_id, p_amount, p_payment_method_id?, p_idempotency_key?)`
+- Idempotent by `idempotency_key`.
+- Ownership enforced for authenticated user.
+- Credits wallet once and writes both `payment_transactions` and `wallet_transactions`.
+
+**Normalized errors**:
+- `wallet_auth_required`
+- `wallet_access_denied`
+- `wallet_not_found`
+- `wallet_amount_invalid`
+
+---
+
 ## REST examples
 
 ### GET /rest/v1/cafes?select=id,name&limit=1
