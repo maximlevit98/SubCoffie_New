@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation";
 
-import LegacyAdminLayout from "@/components/LegacyAdminLayout";
 import { getUserRole } from "@/lib/supabase/roles";
 
 export default async function AdminWalletsLayout({
@@ -22,5 +21,5 @@ export default async function AdminWalletsLayout({
     redirect("/admin/dashboard");
   }
 
-  return <LegacyAdminLayout>{children}</LegacyAdminLayout>;
+  return <>{children}</>;
 }

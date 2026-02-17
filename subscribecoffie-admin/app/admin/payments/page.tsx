@@ -1,4 +1,3 @@
-import LegacyAdminLayout from "@/components/LegacyAdminLayout";
 import { FinancialControlTowerView } from "@/components/FinancialControlTowerView";
 import {
   getAdminFinancialControlTower,
@@ -57,20 +56,18 @@ export default async function PaymentsPage({ searchParams }: PaymentsPageProps) 
   const error = metricsResult.error || anomaliesResult.error || cafesResult.error;
 
   return (
-    <LegacyAdminLayout>
-      <FinancialControlTowerView
-        title="Financial Control Tower"
-        subtitle="Сверка платежей, кошельков и заказов в едином контуре администратора"
-        scopeBadge="Admin scope"
-        basePath="/admin/payments"
-        walletsPath="/admin/wallets"
-        rangeDays={days}
-        cafeFilter={cafeId}
-        cafes={cafesResult.data || []}
-        metrics={metricsResult.data}
-        anomalies={anomaliesResult.data || []}
-        error={error}
-      />
-    </LegacyAdminLayout>
+    <FinancialControlTowerView
+      title="Financial Control Tower"
+      subtitle="Сверка платежей, кошельков и заказов в едином контуре администратора"
+      scopeBadge="Admin scope"
+      basePath="/admin/payments"
+      walletsPath="/admin/wallets"
+      rangeDays={days}
+      cafeFilter={cafeId}
+      cafes={cafesResult.data || []}
+      metrics={metricsResult.data}
+      anomalies={anomaliesResult.data || []}
+      error={error}
+    />
   );
 }

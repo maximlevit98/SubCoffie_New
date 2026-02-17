@@ -1,6 +1,5 @@
 import { redirect } from 'next/navigation';
 
-import LegacyAdminLayout from '@/components/LegacyAdminLayout';
 import { getUserRole } from '@/lib/supabase/roles';
 import { createServerClient } from '@/lib/supabase/server';
 
@@ -28,47 +27,59 @@ type LoyaltyLevelRow = {
 
 type CommissionPolicyMeta = {
   title: string;
-  description: string;
   payer: 'customer' | 'cafe' | 'platform';
-  runtime: string;
+  customerEffect: string;
+  applyMoment: string;
+  note: string;
   sampleBase: number;
 };
 
-const COMMISSION_META: Record<string, CommissionPolicyMeta> = {
+const POLICY_META: Record<string, CommissionPolicyMeta> = {
   cafe_wallet_topup: {
-    title: 'Cafe Wallet Top-up',
-    description: 'Пополнение кошелька конкретной кофейни',
+    title: 'Пополнение Cafe Wallet',
     payer: 'cafe',
-    runtime: 'Применяется в mock_wallet_topup для cafe_wallet',
+    customerEffect: 'Клиенту зачисляется 100% суммы пополнения',
+    applyMoment: 'Во время top-up (mock_wallet_topup)',
+    note: 'Комиссия уходит в учёт кофейни, а не списывается с клиента',
     sampleBase: 1000,
   },
   citypass_order_payment: {
-    title: 'CityPass Order Payment',
-    description: 'Комиссия на оплату заказа CityPass кошельком',
+    title: 'Оплата заказа CityPass',
     payer: 'cafe',
-    runtime: 'Применяется при order_payment (CityPass) через trigger',
+    customerEffect: 'С клиента списывается сумма заказа без доп. удержаний',
+    applyMoment: 'На транзакции order_payment (trigger)',
+    note: 'Комиссия начисляется кофейне по факту оплаты заказа',
     sampleBase: 500,
   },
   citypass_topup: {
-    title: 'CityPass Top-up (Preview)',
-    description: 'Для клиента должен быть 0% (не уменьшает зачисление)',
+    title: 'Пополнение CityPass (preview)',
     payer: 'platform',
-    runtime: 'Используется только для превью top-up в iOS',
+    customerEffect: 'Клиенту должно зачисляться 100% (рекомендуется 0%)',
+    applyMoment: 'Только превью на экране пополнения',
+    note: 'Боевой сбор комиссии вынесен на этап оплаты заказа CityPass',
     sampleBase: 1000,
   },
   direct_order: {
-    title: 'Direct Order',
-    description: 'Резерв для прямой оплаты заказа без кошелька',
+    title: 'Прямая оплата заказа',
     payer: 'customer',
-    runtime: 'Пока не основной путь, держим как конфигурацию',
+    customerEffect: 'Резервная политика для сценариев без кошелька',
+    applyMoment: 'Только если включён direct_order flow',
+    note: 'Оставлено для совместимости с legacy сценариями',
     sampleBase: 500,
   },
 };
 
+const POLICY_ORDER = [
+  'cafe_wallet_topup',
+  'citypass_order_payment',
+  'citypass_topup',
+  'direct_order',
+];
+
 function payerLabel(payer: CommissionPolicyMeta['payer']): string {
-  if (payer === 'cafe') return 'Плательщик: кофейня';
-  if (payer === 'platform') return 'Плательщик: платформа';
-  return 'Плательщик: клиент';
+  if (payer === 'cafe') return 'Кофейня';
+  if (payer === 'platform') return 'Платформа';
+  return 'Клиент';
 }
 
 function payerTone(payer: CommissionPolicyMeta['payer']): string {
@@ -108,142 +119,248 @@ export default async function CommissionSettingsPage() {
 
   const error = commissionError?.message || loyaltyError?.message || null;
 
+  const policiesByType = new Map(
+    ((commissionRows || []) as CommissionRow[]).map((row) => [row.operation_type, row])
+  );
+
+  const orderedPolicies: CommissionRow[] = POLICY_ORDER
+    .map((key) => policiesByType.get(key))
+    .filter((row): row is CommissionRow => Boolean(row));
+
+  for (const row of (commissionRows || []) as CommissionRow[]) {
+    if (!POLICY_ORDER.includes(row.operation_type)) {
+      orderedPolicies.push(row);
+    }
+  }
+
+  const citypassTopupPolicy = policiesByType.get('citypass_topup');
+  const citypassTopupRate = citypassTopupPolicy?.commission_percent || 0;
+  const hasCitypassPreviewMisconfig = citypassTopupRate > 0;
+
   return (
-    <LegacyAdminLayout>
-      <section className="space-y-6">
-        <header className="space-y-2">
-          <h2 className="text-2xl font-semibold text-zinc-900">Комиссии и бонусы</h2>
-          <p className="text-sm text-zinc-600">
-            Модель включена: клиент получает полный top-up, комиссия для Cafe Wallet и CityPass order транзакций начисляется кофейне.
-          </p>
-        </header>
+    <section className="space-y-6">
+      <header className="space-y-2">
+        <h2 className="text-2xl font-semibold text-zinc-900">Commission Settings</h2>
+        <p className="text-sm text-zinc-600">
+          Центр управления комиссиями и бонусами. Базовая модель: клиент получает полный top-up, комиссия по нужным сценариям начисляется кофейне.
+        </p>
+      </header>
 
-        {error ? (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-            <p className="text-sm font-medium text-red-800">Не удалось загрузить настройки</p>
-            <p className="mt-1 text-sm text-red-700">{error}</p>
-          </div>
-        ) : (
-          <>
-            <section className="rounded-lg border border-zinc-200 bg-white p-5">
-              <h3 className="text-lg font-semibold text-zinc-900">Политики комиссий</h3>
-              <p className="mt-1 text-sm text-zinc-600">
-                Изменения применяются в backend RPC сразу после сохранения.
+      {error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-sm font-medium text-red-800">Не удалось загрузить настройки</p>
+          <p className="mt-1 text-sm text-red-700">{error}</p>
+        </div>
+      ) : (
+        <>
+          <section className="rounded-lg border border-zinc-200 bg-white p-5">
+            <h3 className="text-lg font-semibold text-zinc-900">Как работает модель</h3>
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+              <ScenarioCard
+                title="1. Cafe Wallet top-up"
+                payer="Кофейня"
+                result="Клиенту зачисляется полная сумма пополнения"
+                details="Комиссия пишется в payment_transactions как fee_payer = cafe"
+              />
+              <ScenarioCard
+                title="2. CityPass top-up"
+                payer="Нет комиссии на top-up"
+                result="Клиенту зачисляется полная сумма"
+                details="Сбор комиссии происходит позже, на этапе оплаты заказа"
+              />
+              <ScenarioCard
+                title="3. CityPass order payment"
+                payer="Кофейня"
+                result="С клиента списывается только сумма заказа"
+                details="Комиссия начисляется на order_payment и привязывается к cafe_id"
+              />
+            </div>
+          </section>
+
+          {hasCitypassPreviewMisconfig && (
+            <section className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">
+                Внимание: `citypass_topup` сейчас {citypassTopupRate}%. Для текущей модели рекомендуется 0%.
               </p>
-
-              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {((commissionRows || []) as CommissionRow[]).map((row) => {
-                  const meta = COMMISSION_META[row.operation_type] || {
-                    title: row.operation_type,
-                    description: 'Пользовательская конфигурация',
-                    payer: 'customer' as const,
-                    runtime: 'Использование зависит от backend flow',
-                    sampleBase: 1000,
-                  };
-
-                  const sampleFee = calcFee(meta.sampleBase, row.commission_percent);
-
-                  return (
-                    <article key={row.id} className="rounded-lg border border-zinc-200 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <h4 className="text-base font-semibold text-zinc-900">{meta.title}</h4>
-                          <p className="mt-1 text-sm text-zinc-600">{meta.description}</p>
-                        </div>
-                        <span className={`rounded-full px-2 py-1 text-xs font-medium ${payerTone(meta.payer)}`}>
-                          {payerLabel(meta.payer)}
-                        </span>
-                      </div>
-
-                      <p className="mt-3 text-xs text-zinc-500">{meta.runtime}</p>
-
-                      <div className="mt-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-700">
-                        Пример: база {meta.sampleBase.toLocaleString('ru-RU')} кр. → комиссия {sampleFee.toLocaleString('ru-RU')} кр.
-                      </div>
-
-                      <form action={updateCommissionPolicyAction} className="mt-4 flex items-end gap-2">
-                        <input type="hidden" name="operation_type" value={row.operation_type} />
-                        <label className="flex-1 text-xs text-zinc-600">
-                          Ставка (%)
-                          <input
-                            name="commission_percent"
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            max="100"
-                            defaultValue={row.commission_percent}
-                            className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
-                          />
-                        </label>
-                        <button
-                          type="submit"
-                          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-                        >
-                          Сохранить
-                        </button>
-                      </form>
-                    </article>
-                  );
-                })}
-              </div>
             </section>
+          )}
 
-            <section className="rounded-lg border border-zinc-200 bg-white p-5">
-              <h3 className="text-lg font-semibold text-zinc-900">Бонусы (cashback по уровням)</h3>
-              <p className="mt-1 text-sm text-zinc-600">
-                Управление бонусной нагрузкой через проценты cashback в уровнях лояльности.
-              </p>
+          <section className="rounded-lg border border-zinc-200 bg-white p-5">
+            <h3 className="text-lg font-semibold text-zinc-900">Политики комиссий</h3>
+            <p className="mt-1 text-sm text-zinc-600">
+              Каждая строка показывает: кто платит, где применяется и как влияет на клиента.
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Если политика выключена (`active = false`), она не должна участвовать в расчётах backend flow.
+            </p>
 
-              <div className="mt-4 overflow-x-auto">
-                <table className="min-w-full divide-y divide-zinc-200">
-                  <thead className="bg-zinc-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Уровень</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Порог, points</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Cashback</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Обновить</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-100 bg-white">
-                    {((loyaltyLevels || []) as LoyaltyLevelRow[]).map((level) => (
-                      <tr key={level.id}>
-                        <td className="px-4 py-3 text-sm font-medium text-zinc-900">{level.level_name}</td>
-                        <td className="px-4 py-3 text-right text-sm text-zinc-700">
-                          {level.points_required.toLocaleString('ru-RU')}
+            <div className="mt-4 overflow-x-auto">
+              <table className="min-w-full divide-y divide-zinc-200">
+                <thead className="bg-zinc-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Сценарий</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Плательщик</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Статус</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Ставка</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Эффект для клиента</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Применение</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Изменить</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 bg-white">
+                  {orderedPolicies.map((row) => {
+                    const meta = POLICY_META[row.operation_type] || {
+                      title: row.operation_type,
+                      payer: 'customer' as const,
+                      customerEffect: 'Зависит от flow',
+                      applyMoment: 'Зависит от backend реализации',
+                      note: 'Без описания',
+                      sampleBase: 1000,
+                    };
+
+                    const sampleFee = calcFee(meta.sampleBase, row.commission_percent);
+
+                    return (
+                      <tr key={row.id} className="align-top">
+                        <td className="px-4 py-3">
+                          <p className="text-sm font-semibold text-zinc-900">{meta.title}</p>
+                          <p className="mt-1 text-xs text-zinc-500">{row.operation_type}</p>
+                          <p className="mt-2 text-xs text-zinc-500">{meta.note}</p>
                         </td>
                         <td className="px-4 py-3">
-                          <form action={updateLoyaltyBonusAction} className="flex items-center justify-end gap-2">
-                            <input type="hidden" name="level_id" value={level.id} />
+                          <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${payerTone(meta.payer)}`}>
+                            {payerLabel(meta.payer)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${
+                              row.active
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-zinc-100 text-zinc-600'
+                            }`}
+                          >
+                            {row.active ? 'Включено' : 'Выключено'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <p className="text-sm font-semibold text-zinc-900">{row.commission_percent}%</p>
+                          <p className="mt-1 text-xs text-zinc-500">
+                            пример: {meta.sampleBase.toLocaleString('ru-RU')} → {sampleFee.toLocaleString('ru-RU')} кр.
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-zinc-700">{meta.customerEffect}</td>
+                        <td className="px-4 py-3 text-sm text-zinc-700">{meta.applyMoment}</td>
+                        <td className="px-4 py-3">
+                          <form action={updateCommissionPolicyAction} className="flex items-center justify-end gap-2">
+                            <input type="hidden" name="operation_type" value={row.operation_type} />
                             <input
-                              name="cashback_percent"
+                              name="commission_percent"
                               type="number"
                               step="0.01"
                               min="0"
                               max="100"
-                              defaultValue={level.cashback_percent}
-                              className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-right text-sm"
+                              defaultValue={row.commission_percent}
+                              disabled={!row.active}
+                              className="w-24 rounded-md border border-zinc-300 px-2 py-1 text-right text-sm disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
                             />
                             <span className="text-sm text-zinc-500">%</span>
                             <button
                               type="submit"
-                              className="rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                              disabled={!row.active}
+                              className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
                             >
                               Сохранить
                             </button>
                           </form>
                         </td>
-                        <td className="px-4 py-3 text-right text-xs text-zinc-500">
-                          {level.updated_at ? new Date(level.updated_at).toLocaleString('ru-RU') : '—'}
-                        </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </>
-        )}
-      </section>
-    </LegacyAdminLayout>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-zinc-200 bg-white p-5">
+            <h3 className="text-lg font-semibold text-zinc-900">Бонусы и cashback</h3>
+            <p className="mt-1 text-sm text-zinc-600">
+              Настройка бонусной нагрузки по уровням лояльности. Значения влияют на будущие начисления.
+            </p>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {((loyaltyLevels || []) as LoyaltyLevelRow[]).map((level) => {
+                const sampleOrder = 300;
+                const sampleCashback = calcFee(sampleOrder, level.cashback_percent);
+
+                return (
+                  <article key={level.id} className="rounded-lg border border-zinc-200 p-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-base font-semibold text-zinc-900">{level.level_name}</h4>
+                      <span className="text-xs text-zinc-500">от {level.points_required.toLocaleString('ru-RU')} pts</span>
+                    </div>
+
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Пример: заказ {sampleOrder} кр. → cashback {sampleCashback} кр.
+                    </p>
+
+                    <form action={updateLoyaltyBonusAction} className="mt-4 flex items-end gap-2">
+                      <input type="hidden" name="level_id" value={level.id} />
+                      <label className="flex-1 text-xs text-zinc-600">
+                        Cashback (%)
+                        <input
+                          name="cashback_percent"
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="100"
+                          defaultValue={level.cashback_percent}
+                          className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+                        />
+                      </label>
+                      <button
+                        type="submit"
+                        className="rounded-md border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                      >
+                        Сохранить
+                      </button>
+                    </form>
+
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Обновлено: {level.updated_at ? new Date(level.updated_at).toLocaleString('ru-RU') : '—'}
+                    </p>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ScenarioCard({
+  title,
+  payer,
+  result,
+  details,
+}: {
+  title: string;
+  payer: string;
+  result: string;
+  details: string;
+}) {
+  return (
+    <article className="rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+      <h4 className="text-sm font-semibold text-zinc-900">{title}</h4>
+      <p className="mt-2 text-sm text-zinc-700">
+        <span className="font-medium">Плательщик:</span> {payer}
+      </p>
+      <p className="mt-1 text-sm text-zinc-700">
+        <span className="font-medium">Результат:</span> {result}
+      </p>
+      <p className="mt-2 text-xs text-zinc-500">{details}</p>
+    </article>
   );
 }

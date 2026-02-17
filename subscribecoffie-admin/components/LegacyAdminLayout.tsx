@@ -10,14 +10,14 @@ export default async function LegacyAdminLayout({
 
   return (
     <>
-      <header className="border-b border-zinc-200 bg-white px-6 py-4">
+      <header className="sticky top-0 z-20 border-b border-zinc-200 bg-white px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold">SubscribeCoffie Admin</h1>
           {/* Removed owner panel links - strict context separation */}
         </div>
       </header>
       <div className="flex min-h-[calc(100vh-64px)]">
-        <aside className="w-56 border-r border-zinc-200 bg-white px-4 py-6">
+        <aside className="sticky top-16 h-[calc(100vh-64px)] w-56 overflow-y-auto border-r border-zinc-200 bg-white px-4 py-6">
           <nav className="flex flex-col gap-2 text-sm font-medium text-zinc-700">
             <Link
               href="/admin/dashboard"

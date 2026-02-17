@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { Suspense } from "react";
 import { redirect } from "next/navigation";
 
 import {
@@ -11,7 +10,6 @@ import {
 } from "../../../lib/supabase/queries/analytics";
 import { listCafes } from "../../../lib/supabase/queries/cafes";
 import { CafeSelectorClient } from "./CafeSelectorClient";
-import LegacyAdminLayout from "@/components/LegacyAdminLayout";
 import { getUserRole } from "@/lib/supabase/roles";
 
 type PageProps = {
@@ -69,14 +67,12 @@ export default async function DashboardPage({ searchParams }: PageProps) {
 
   if (error) {
     return (
-      <LegacyAdminLayout>
       <section className="space-y-4">
         <h2 className="text-2xl font-semibold">Dashboard</h2>
         <p className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           Не удалось загрузить dashboard: {error}
         </p>
       </section>
-      </LegacyAdminLayout>
     );
   }
 
@@ -86,7 +82,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
   const allTime = metrics?.all_time || {};
 
   return (
-    <LegacyAdminLayout>
     <section className="space-y-6">
       {/* Header with Cafe Selector */}
       <div className="flex items-center justify-between">
@@ -332,7 +327,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         />
       </div>
     </section>
-  </LegacyAdminLayout>
   );
 }
 
