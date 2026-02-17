@@ -52,11 +52,11 @@ const POLICY_META: Record<string, CommissionPolicyMeta> = {
     sampleBase: 500,
   },
   citypass_topup: {
-    title: 'Пополнение CityPass (preview)',
-    payer: 'platform',
-    customerEffect: 'Клиенту должно зачисляться 100% (рекомендуется 0%)',
-    applyMoment: 'Только превью на экране пополнения',
-    note: 'Боевой сбор комиссии вынесен на этап оплаты заказа CityPass',
+    title: 'Пополнение CityPass',
+    payer: 'cafe',
+    customerEffect: 'Клиенту зачисляется 100% суммы пополнения',
+    applyMoment: 'На транзакции top_up (CityPass)',
+    note: 'Комиссия по пополнению CityPass выставляется кофейне',
     sampleBase: 1000,
   },
   direct_order: {
@@ -133,10 +133,6 @@ export default async function CommissionSettingsPage() {
     }
   }
 
-  const citypassTopupPolicy = policiesByType.get('citypass_topup');
-  const citypassTopupRate = citypassTopupPolicy?.commission_percent || 0;
-  const hasCitypassPreviewMisconfig = citypassTopupRate > 0;
-
   return (
     <section className="space-y-6">
       <header className="space-y-2">
@@ -164,9 +160,9 @@ export default async function CommissionSettingsPage() {
               />
               <ScenarioCard
                 title="2. CityPass top-up"
-                payer="Нет комиссии на top-up"
+                payer="Кофейня"
                 result="Клиенту зачисляется полная сумма"
-                details="Сбор комиссии происходит позже, на этапе оплаты заказа"
+                details="Комиссия начисляется на транзакции пополнения CityPass"
               />
               <ScenarioCard
                 title="3. CityPass order payment"
@@ -176,14 +172,6 @@ export default async function CommissionSettingsPage() {
               />
             </div>
           </section>
-
-          {hasCitypassPreviewMisconfig && (
-            <section className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <p className="text-sm font-medium text-amber-800">
-                Внимание: `citypass_topup` сейчас {citypassTopupRate}%. Для текущей модели рекомендуется 0%.
-              </p>
-            </section>
-          )}
 
           <section className="rounded-lg border border-zinc-200 bg-white p-5">
             <h3 className="text-lg font-semibold text-zinc-900">Политики комиссий</h3>
